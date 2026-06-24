@@ -10,13 +10,21 @@ l1_chain_id = 11155111
 # CTM upgrade's chain-creation params.
 zk_token_asset_id = "0xefb0794fa43edc760ef9bf5b09af2fc0a667a288453d2d55d48878897dc2f317"
 
-# Split era: the core withdrawal contracts (L1AssetRouter/L1Nullifier/MailboxFacet)
-# carry the LEGACY Era chain id 270 (a placeholder — chain 270 is not registered
-# on the testnet bridgehub, so its eraDiamond is address(0)), preserved by v31.
-# The registered/new Era is 301 (`era_chain_id` in the v31 input; used by the PUH,
-# FixedForceDeployment and CTM resolution). PUVT uses this value only for the
-# core-withdrawal-contract checks.
-legacy_era_chain_id = 270
+# Single-era: the core withdrawal contracts (L1AssetRouter/L1Nullifier/MailboxFacet)
+# use the registered Era chain id 301 (= `era_chain_id` in the v31 input) for their
+# immutable ERA_CHAIN_ID / ERA_DIAMOND_PROXY, so they point at the real, registered
+# Era diamond (Bridgehub.getZKChain(301)). This keeps the legacy-Era-only surface
+# reachable on chain 301 — Mailbox.requestL2Transaction / finalizeEthWithdrawal
+# (gated by `s.chainId == ERA_CHAIN_ID`), the L1AssetRouter Era-diamond direct-call
+# path, and the L1Nullifier legacy-withdrawal batch boundaries — so era-only
+# functionality can actually be exercised on testnet.
+#
+# An earlier revision split this into a legacy 270 placeholder vs the registered 301,
+# but chain 270 has no registered diamond (eraDiamond = address(0)), which made the
+# legacy-Era surface untestable. `legacy_era_chain_id` is therefore omitted; PUVT
+# defaults it to `era_chain_id` (301), and DefaultCoreUpgrade/DefaultCTMUpgrade now
+# source eraChainId from the upgrade input TOML's `era_chain_id` rather than the
+# pre-upgrade on-chain AssetRouter (which still carries 270).
 
 [permanent_contracts]
 create2_factory_addr = "0x4e59b44847b379578588920cA78FbF26c0B4956C"

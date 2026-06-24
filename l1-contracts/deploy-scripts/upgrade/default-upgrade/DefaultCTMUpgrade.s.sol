@@ -402,7 +402,14 @@ contract DefaultCTMUpgrade is Script, DefaultL2UpgradeStrategy {
         }
 
         config.ownerAddress = ctmAddresses.admin.governance;
-        config.eraChainId = AddressIntrospector.getEraChainId(coreAddresses.bridges.proxies.l1AssetRouter);
+        // Prefer the TOML-sourced era_chain_id (set in initializeConfigFromArgs from
+        // `$.era_chain_id`); fall back to on-chain introspection only when it wasn't
+        // provided. On split-era testnet this keeps the registered Era (301) rather
+        // than the legacy on-chain value (270), so the era diamond discovered below
+        // is the real, registered one.
+        if (config.eraChainId == 0) {
+            config.eraChainId = AddressIntrospector.getEraChainId(coreAddresses.bridges.proxies.l1AssetRouter);
+        }
 
         address eraChainAddress = bridgehub.getZKChain(config.eraChainId);
         if (eraChainAddress != address(0)) {

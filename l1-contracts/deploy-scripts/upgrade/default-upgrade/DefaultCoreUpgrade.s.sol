@@ -139,6 +139,19 @@ contract DefaultCoreUpgrade is Script, DeployL1CoreUtils {
             config.legacyGatewayChainId = upgradeToml.readUint("$.legacy_gateway.chain_id");
         }
 
+        // Era chain id for the new core contracts' immutable ERA_CHAIN_ID /
+        // ERA_DIAMOND_PROXY. Sourced from the upgrade input TOML's top-level
+        // `era_chain_id` so it reflects the REGISTERED Era chain, not whatever the
+        // pre-upgrade on-chain AssetRouter carries. Single-era envs (stage/mainnet):
+        // the TOML value equals the on-chain value, so this is a no-op. Split-era
+        // testnet: promotes the legacy 270 placeholder to the registered 301 so the
+        // legacy-Era surface (Mailbox.requestL2Transaction / finalizeEthWithdrawal,
+        // the L1AssetRouter Era-diamond direct-call path, L1Nullifier legacy
+        // withdrawals) targets a real, registered diamond.
+        if (upgradeToml.keyExists("$.era_chain_id")) {
+            config.eraChainId = upgradeToml.readUint("$.era_chain_id");
+        }
+
         coreAddresses.bridgehub.proxies.bridgehub = bridgehubProxyAddress;
         require(coreAddresses.bridgehub.proxies.bridgehub != address(0), "bridgehub_proxy_addr is zero");
         setAddressesBasedOnBridgehub();
@@ -151,8 +164,13 @@ contract DefaultCoreUpgrade is Script, DeployL1CoreUtils {
         Governance governance = Governance(payable(coreAddresses.shared.governance));
         config.l1ChainId = block.chainid;
         config.deployerAddress = getBroadcasterAddress();
-        config.eraChainId = assetRouter.ERA_CHAIN_ID();
-        config.eraDiamondProxyAddress = bridgehub.getZKChain(assetRouter.ERA_CHAIN_ID());
+        // `config.eraChainId` is sourced from the upgrade input TOML's `era_chain_id`
+        // in initializeConfigWithArgs; fall back to the on-chain AssetRouter only
+        // when the TOML didn't supply one (keeps fresh/local deploys working).
+        if (config.eraChainId == 0) {
+            config.eraChainId = assetRouter.ERA_CHAIN_ID();
+        }
+        config.eraDiamondProxyAddress = bridgehub.getZKChain(config.eraChainId);
 
         config.ownerAddress = assetRouter.owner();
 
