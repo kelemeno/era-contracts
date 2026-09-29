@@ -1,0 +1,25 @@
+# Scratch caller: exercises the reusable execute-eoa-upgrade workflow of
+# matter-labs/era-contracts from another repository (a dry run; preflight is
+# expected to refuse this repository, so broadcast never starts).
+name: Scratch caller of execute-eoa-upgrade
+
+on:
+  push:
+    branches: [kl/eoa-executor-scratch-caller]
+
+permissions: {}
+
+jobs:
+  execute:
+    uses: matter-labs/era-contracts/.github/workflows/execute-eoa-upgrade.yaml@e8dc2af8cd4a39f0190e613027a8f2f61068f747
+    permissions:
+      contents: read
+      actions: read
+    with:
+      executor_sha: e8dc2af8cd4a39f0190e613027a8f2f61068f747
+      executor_branch: kl/eoa-upgrade-executor-v31
+      source_sha: a92ad0057f77adfe6a6bdb46d8b2fb60b2ef804c
+      source_branch: kl/v33-stage-compiler-upgrade-draft-v31
+      path: l1-contracts/upgrade-envs/v0.33.0-compiler/output/stage/emergency-upgrade-board.json
+      environment: stage
+      dry_run: true
