@@ -1,6 +1,8 @@
-# Scratch caller: exercises the reusable execute-eoa-upgrade workflow of
-# matter-labs/era-contracts from another repository (a dry run; preflight is
-# expected to refuse this repository, so broadcast never starts).
+# Scratch caller in a fork: runs the same caller as era-contracts-private's
+# `executor` branch against the reusable workflow, as a dry run. preflight
+# refuses this repository, so broadcast never starts.
+#   pinned:   the real caller (pin job + execute)
+#   mismatch: executor_sha differs from the commit in `uses:`; resolve must refuse
 name: Scratch caller of execute-eoa-upgrade
 
 on:
@@ -10,8 +12,57 @@ on:
 permissions: {}
 
 jobs:
-  execute:
-    uses: matter-labs/era-contracts/.github/workflows/execute-eoa-upgrade.yaml@e8dc2af8cd4a39f0190e613027a8f2f61068f747
+  # Runs before anything from era-contracts: the commit in `uses:` below, as
+  # this run records it, must be on EXECUTOR_BRANCH of matter-labs/era-contracts.
+  # A commit that exists only in a fork is also reachable through
+  # matter-labs/era-contracts by SHA (an "impostor commit"); this refuses it.
+  pin:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      executor_sha: ${{ steps.pin.outputs.sha }}
+      executor_branch: ${{ steps.pin.outputs.branch }}
+    env:
+      UPSTREAM_REPO: matter-labs/era-contracts
+      EXECUTOR_BRANCH: kl/eoa-upgrade-executor-v31
+    steps:
+      - id: pin
+        name: Check the pinned executor commit is on its upstream branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_API: repos/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          sha="$(gh api "$RUN_API" --jq "[.referenced_workflows[] | select(.path | startswith(\"$UPSTREAM_REPO/.github/workflows/execute-eoa-upgrade.yaml@\")) | .sha] | unique | join(\" \")")"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || fail "cannot tell which commit of the executor this run uses ('$sha')"
+          status="$(curl --fail --silent --show-error --retry 3 \
+            "https://api.github.com/repos/$UPSTREAM_REPO/compare/$EXECUTOR_BRANCH...$sha" | jq -r .status)" ||
+            fail "cannot compare $sha with $UPSTREAM_REPO branch $EXECUTOR_BRANCH"
+          case "$status" in behind | identical) ;; *) fail "$sha is not on $UPSTREAM_REPO branch $EXECUTOR_BRANCH ($status)" ;; esac
+          echo "sha=$sha" >>"$GITHUB_OUTPUT"
+          echo "branch=$EXECUTOR_BRANCH" >>"$GITHUB_OUTPUT"
+          echo "executor $UPSTREAM_REPO@$sha is on $EXECUTOR_BRANCH ($status)"
+
+  pinned:
+    needs: pin
+    uses: matter-labs/era-contracts/.github/workflows/execute-eoa-upgrade.yaml@503876f40439888bd64567c7058eb7b4dd66f0d3
+    permissions:
+      contents: read
+      actions: read
+    with:
+      executor_sha: ${{ needs.pin.outputs.executor_sha }}
+      executor_branch: ${{ needs.pin.outputs.executor_branch }}
+      source_sha: a92ad0057f77adfe6a6bdb46d8b2fb60b2ef804c
+      source_branch: kl/v33-stage-compiler-upgrade-draft-v31
+      path: l1-contracts/upgrade-envs/v0.33.0-compiler/output/stage/emergency-upgrade-board.json
+      environment: stage
+      dry_run: true
+
+  mismatch:
+    uses: matter-labs/era-contracts/.github/workflows/execute-eoa-upgrade.yaml@503876f40439888bd64567c7058eb7b4dd66f0d3
     permissions:
       contents: read
       actions: read
