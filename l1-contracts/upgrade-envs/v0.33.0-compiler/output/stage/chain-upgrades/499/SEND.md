@@ -6,6 +6,20 @@ Re-checked on 2026-10-02: sender nonce 322, balance 5.15 ETH; eth_call of each t
 
 **Before sending:** confirm stage's server and prover are on a v33-capable build (zksync-era-private dev >= e0650a889).
 
+## When to send each tx
+
+Watch the latest batch on stage. A batch's `baseSystemContractsHashes.bootloader` tells you whether it is a v32 or a v33 batch.
+
+```bash
+U=https://dev-api.era-stage-proofs.zksync.dev
+N=$(curl -s -X POST -H 'content-type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"zks_L1BatchNumber","params":[]}' ${U} | jq -r .result)
+curl -s -X POST -H 'content-type: application/json' --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"zks_getL1BatchDetails\",\"params\":[$((N))]}" ${U} | jq -c '.result|{number,bootloader:.baseSystemContractsHashes.bootloader,commitTxHash}'
+```
+
+1. **Tx 1**: any time after the server is on the v33 build. It only stores the timestamp in ChainAdmin, and the server does not read it.
+2. **Tx 2**: right after tx 1. This emits `UpgradeTimestampUpdated` on the ServerNotifier. The server's eth_watch picks it up and reads the v33 upgrade from the CTM. When `zks_getProtocolVersion(33)` returns non-null, the server has registered the upgrade. The next batch it opens is the v33 upgrade batch (bootloader `0x01000945a9e6…`). It can't be committed until tx 3 lands, but the earlier v32 batches keep committing.
+3. **Tx 3**: send it once the latest batch shows the **new** bootloader **and** the batch before it has a `commitTxHash`. That usually takes about 5 to 10 minutes after tx 2. Don't send it earlier: after tx 3 the server only commits batches whose bootloader matches L1's, so a sealed but uncommitted v32 batch would be stuck. Don't wait long after that either, because commits pause until tx 3 lands.
+
 ## Tx 1 (nonce 322): ChainAdmin setUpgradeTimestamp(v0.33.0, 1)
 
 To: `0x3543055b186b5Fc8B214397955e850c712D831AD`
