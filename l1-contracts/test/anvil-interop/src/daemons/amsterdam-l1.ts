@@ -52,7 +52,7 @@ export function writeAmsterdamStateDump(loadStatePath: string, port: number): st
   return outputPath;
 }
 
-type CanaryEstimate = { what: string; gas: ethers.BigNumber; expected: number; atLeast?: boolean };
+type CanaryEstimate = { what: string; gas: ethers.BigNumber; expected: number; isLowerBound?: boolean };
 
 /**
  * Fails unless the started L1 runs Glamsterdam's gas schedule at the Amsterdam block gas limit: a build that
@@ -106,14 +106,14 @@ export async function assertAmsterdamL1(provider: ethers.providers.JsonRpcProvid
       expected:
         glamsterdamIntrinsicGas(deploy).intrinsic +
         glamsterdamStateGas({ newAccounts: 1, newCodeBytes: GLAMSTERDAM_CANARY_RUNTIME_BYTES, newSlots: 0 }),
-      atLeast: true,
+      isLowerBound: true,
     },
   ];
 
   const explain = (estimate: CanaryEstimate) =>
-    `${estimate.what} estimates ${estimate.gas} gas, expected ${estimate.atLeast ? "at least " : ""}${estimate.expected}`;
+    `${estimate.what} estimates ${estimate.gas} gas, expected ${estimate.isLowerBound ? "at least " : ""}${estimate.expected}`;
   const wrong = estimates.filter((estimate) =>
-    estimate.atLeast ? estimate.gas.lt(estimate.expected) : !estimate.gas.eq(estimate.expected)
+    estimate.isLowerBound ? estimate.gas.lt(estimate.expected) : !estimate.gas.eq(estimate.expected)
   );
   if (wrong.length > 0) {
     throw new Error(
