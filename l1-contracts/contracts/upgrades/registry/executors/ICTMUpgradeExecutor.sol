@@ -37,16 +37,10 @@ interface ICTMUpgradeExecutor {
     ///        must be `CTM`.
     function applyInfrastructureUpgrade(IProxyUpgradeTransition _infrastructureTransition) external;
 
-    /// @notice Commits `_transition` on the bound CTM, after checking both of its edges against the
-    ///         CTM's current release and version and that every L2 bytecode it depends on is
-    ///         published, then holds the result to {validateTransitionApplied}.
+    /// @notice Commits `_transition` on the bound CTM (`setNewVersionUpgradeFromTransition`, which
+    ///         holds every check of the commit).
     /// @param _transition The write-once transition approved by governance.
     function applyCTMUpgrade(ICTMTransition _transition) external;
-
-    /// @notice Reverts unless `_transition` ITSELF is the transition committed on the bound CTM
-    ///         and the CTM has reached its target — the check `applyCTMUpgrade` ends with, readable
-    ///         afterwards; a replaced transition fails it.
-    function validateTransitionApplied(ICTMTransition _transition) external view;
 
     /// @notice Upgrades a single chain diamond to the transition's new protocol version with the
     ///         same composed cut that `applyCTMUpgrade` committed to.
@@ -58,7 +52,8 @@ interface ICTMUpgradeExecutor {
     ///        chain on this CTM, including ones deliberately waiting to finalize batches first;
     ///      - ANYONE ELSE only once the old-version deadline has passed, at which point the
     ///        upgrade is operationally mandatory and execution carries no discretionary inputs.
-    ///      The chain-side `upgradeTimestamp` gate applies to non-admin callers regardless.
+    ///      The chain's own `upgradeTimestamp` gate does NOT apply here: the chain sees the CTM as
+    ///      the caller, and the CTM is exempt from it. This deadline is the only timing gate.
     /// @param _transition The transition the CTM currently commits for the chain's departure
     ///        (`upgradeTransition`) — after a replacement, the replacement, never the replaced one.
     /// @param _chainId The chain to upgrade.

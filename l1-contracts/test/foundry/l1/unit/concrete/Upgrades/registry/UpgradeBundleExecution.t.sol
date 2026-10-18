@@ -29,7 +29,6 @@ import {
     L2BytecodeNotPublished,
     ProxyUpgradeDomainMismatch,
     ProxyUpgradeRowMismatch,
-    RegistryTargetHasNoCode,
     TransitionReleaseMismatch
 } from "contracts/common/L1ContractErrors.sol";
 import {ProxyUpgradeDomain, ProxyUpgradeRow} from "contracts/upgrades/registry/RegistryTypes.sol";
@@ -260,8 +259,7 @@ contract UpgradeBundleExecutionTest is CTMUpgradeExecutorFixture {
         assertEq(chainContractAddress.currentRelease(), address(release));
         assertEq(_liveImpl(ecosystemProxyAdmin, ecosystemProxy), implNew, "the core row must be applied");
         assertEq(_liveImpl(ctmProxyAdmin, ctmDomainProxy), implNew, "the CTM-domain row must be applied");
-        // The post-state check `applyCTMUpgrade` ends with keeps holding afterwards.
-        ctmExecutor.validateTransitionApplied(ICTMTransition(address(transition)));
+        _assertTransitionApplied(chainContractAddress, ICTMTransition(address(transition)), address(ctmExecutor));
     }
 
     /// @dev A core-only upgrade is one call and buys no chain-version edge.
@@ -512,9 +510,11 @@ contract UpgradeBundleExecutionTest is CTMUpgradeExecutorFixture {
 
     /// @dev A leg naming an undeployed object would otherwise "succeed" over nothing (a call into a
     ///      codeless address returns successfully), so each entrypoint refuses it.
+    /// @dev Each leg's first read of its object (`domain()`, `fromRelease()`) fails to decode on a
+    ///      codeless address, so the proposal reverts without data and nothing stands.
     function test_revertWhen_aLegNamesAnUndeployedObject() public {
         address codeless = makeAddr("codelessObject");
-        bytes memory noCode = abi.encodeWithSelector(RegistryTargetHasNoCode.selector, codeless);
+        bytes memory noCode = "";
         _expectProposalRevert(_bundle(_coreLeg(codeless)), noCode);
         _expectProposalRevert(_bundle(_coreLeg(address(coreTransition)), _infrastructureLeg(codeless)), noCode);
         _expectProposalRevert(

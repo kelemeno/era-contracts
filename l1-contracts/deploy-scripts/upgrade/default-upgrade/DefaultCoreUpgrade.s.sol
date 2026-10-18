@@ -137,7 +137,6 @@ contract DefaultCoreUpgrade is Script, DeployL1CoreUtils {
                 "ProxyUpgradeTransition"
             )
         );
-        coreTransition.validate();
     }
 
     /// @notice The enum-indexed ecosystem inventory: one slot per `L1EcosystemContract` member, a

@@ -85,7 +85,12 @@ from calldata:
   the getters it links (asset router, nullifier, NTV, message root, CTM deployment tracker, chain
   asset handler, chain registration sender, interop handler) or through the CTM (itself, its
   validator timelock, bytecodes supplier, permissionless validator, server notifier), and its
-  `implNew` runs the slot's contract. A row in a slot that is no proxy of its domain fails.
+  `implNew` runs the slot's contract. A row in a slot that is no proxy of its domain fails. Before
+  that, the inventory must be exactly its enum's length with at least one participating row, and
+  every participating row a real edge: nonzero `proxy` and `expectedOldImpl`, an `implNew` other
+  than `expectedOldImpl`, no proxy twice. A new `ChainTypeManager` implementation's constructor
+  immutables, which code identity masks, are held by value against the live CTM or the package's
+  CTM-domain proxies.
 - **Bound authority** — the domain executors the legs run through (the CTM executor's immutable
   CTM and `ProxyAdmin` held against the package's independently reviewed CTM and `ProxyAdmin`, the
   core executor's against the ecosystem `ProxyAdmin`), the CTM and both ProxyAdmins, and the
@@ -112,8 +117,11 @@ from calldata:
   genesis image or the CTM supplier's `EVMBytecodePublished` log; a shell in neither is an ERROR. A
   logic change is an ERROR when the edge's delegate is absent, the stock `L2DefaultUpgrade` or code
   the reviewed commit does not build, and a WARN naming any other delegate.
-- **Readiness**, reported apart from anything about value: the transition's L2 factory
-  dependencies published on the CTM's supplier.
+- **Readiness**, reported apart from anything about value: the transition's or the bootstrap
+  migration's L2 factory dependencies published on the CTM's supplier.
+- **Release validity** — the arriving release's own `validate()`, called before the vote. It
+  depends only on the code at the addresses it names, so a revert here is the install failing at
+  governance execution.
 
 **Does the signed transaction invoke the reviewed upgrade, at the reviewed addresses, in the
 reviewed order?** For an upgrade that is the whole of it (`verify_upgrade_calls`): each leg is
@@ -130,15 +138,14 @@ implementation to keep in sync.
 A bootstrap edge is the exception, because its executors do not yet hold their domains: governance
 executes a LIST of ordinary calls that `RegistryBootstrapSequence.actions()` derives, so the
 submitted bundle must END with exactly that list, and only declared calls outside the edge's
-authorities (the merge's extras) may precede it. The list's last call is `validateApplied()` on the
-migration, so a bootstrap that does not complete reverts the whole bundle; there is no separate
-completion check after the replay. That list comparison is transitional scaffolding for the
+authorities (the merge's extras) may precede it. The list's last call is `migrate()` on the
+migration, and nothing may follow it. That list comparison is transitional scaffolding for the
 bootstrap alone, and nothing new should be built on it. A replacement's bundle carries one
 `forward` to the CTM's executor and nothing else that reaches the CTM or its executor.
 
 It deliberately does NOT re-derive facet cuts, L2 transactions or proposals — those come from the
-audited on-chain derivation. It also does not call the objects' own `validate()`: that runs
-against post-handover state, so pre-execution it reverts by design.
+audited on-chain derivation. Of the objects' own `validate()` it calls only the arriving
+release's; what the others check, its other checks cover.
 
 ```bash
 cargo run --release --bin protocol_ops -- ecosystem verify-bootstrap \
@@ -164,6 +171,13 @@ disagreement is an ERROR: the reviewer read one upgrade and governance would sig
 upgrade the legs and the summaries must match one for one, so a reported object without its leg, a
 leg without its reported object, a substituted object or executor and a duplicated leg are refused
 when the package loads.
+
+**Did the bundle land?** is not this verifier's question but `ecosystem upgrade-governance`'s: it
+replays the bundle on a fork and fails unless the fork is left in the state the package describes
+(`registry/applied.rs`): the CTM's version, release and committed transition, the CTM domain and the
+notifier held by the CTM executor, both executors owned by governance, no nomination outstanding,
+every row's proxy at its `implNew` (why these are not on chain:
+[Where each check lives](../../../protocol-docs/ecosystem-upgrade.md#where-each-check-lives)).
 
 ## What protocol-ops is
 

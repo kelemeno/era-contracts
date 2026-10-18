@@ -12,7 +12,6 @@ import {IDefaultUpgrade} from "contracts/upgrades/IDefaultUpgrade.sol";
 import {SemVer} from "contracts/common/libraries/SemVer.sol";
 import {Utils} from "foundry-test/l1/unit/concrete/Utils/Utils.sol";
 import {
-    NoCommittedUpgradeCutForVersion,
     ProtocolIdMismatch,
     ProtocolIdNotGreater,
     Unauthorized,
@@ -56,7 +55,9 @@ contract UpgradeChainFromVersionTest is AdminTest {
 
     function test_revertWhen_noCommittedCutForVersion() public {
         // The chain reads the cut from its CTM, so an edge the CTM never committed is simply not
-        // executable — there are no cut bytes for a caller to supply in its place.
+        // executable — there are no cut bytes for a caller to supply in its place. The CTM's read
+        // reverts without data (there is no transition to compose a cut from), and the chain
+        // propagates it.
         address admin = utilsFacet.util_getAdmin();
         address chainTypeManager = makeAddr("chainTypeManager");
         uint256 oldProtocolVersion = 1;
@@ -65,11 +66,11 @@ contract UpgradeChainFromVersionTest is AdminTest {
         vm.mockCallRevert(
             chainTypeManager,
             abi.encodeWithSelector(IChainTypeManager.upgradeCutForVersion.selector, oldProtocolVersion),
-            abi.encodeWithSelector(NoCommittedUpgradeCutForVersion.selector, oldProtocolVersion)
+            ""
         );
 
         vm.startPrank(admin);
-        vm.expectRevert(abi.encodeWithSelector(NoCommittedUpgradeCutForVersion.selector, oldProtocolVersion));
+        vm.expectRevert(bytes(""));
         adminFacet.upgradeChainFromVersion(address(adminFacet), oldProtocolVersion);
     }
 

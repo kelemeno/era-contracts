@@ -15,7 +15,7 @@ import {ProxyUpgradeRowLib} from "contracts/upgrades/registry/libraries/ProxyUpg
 import {
     ProxyUpgradeDomainMismatch,
     ProxyUpgradeRowMismatch,
-    RegistryTargetHasNoCode
+    RenounceOwnershipDisabled
 } from "contracts/common/L1ContractErrors.sol";
 import {
     ProxyUpgradeDomain,
@@ -39,6 +39,12 @@ contract DummyImplA {
 contract DummyImplB {
     function version() external pure returns (uint256) {
         return 2;
+    }
+}
+
+contract DummyImplC {
+    function version() external pure returns (uint256) {
+        return 3;
     }
 }
 
@@ -71,8 +77,7 @@ contract CoreUpgradeExecutorTest is Test {
         messageRootProxy = new TransparentUpgradeableProxy(address(implNew), address(proxyAdmin), hex"");
 
         // Both rows are source-checked edges (old -> new). MessageRoot already runs its target, so
-        // the executor's live comparison must skip it. Every row must be a real, unique edge — a
-        // placeholder (all-zero) or self-edge row is rejected at the registry boundary.
+        // the executor's live comparison must skip it.
         ProxyUpgradeRow[] memory rows = new ProxyUpgradeRow[](2);
         rows[0] = _row(address(bridgehubProxy), address(implOld), address(implNew));
         rows[1] = _row(address(messageRootProxy), address(implOld), address(implNew));
@@ -227,13 +232,150 @@ contract CoreUpgradeExecutorTest is Test {
     /// @dev Retargeted from the removed codehash anchor to the check that still guards this
     ///      entrypoint: the registry must be DEPLOYED. A call into a codeless address succeeds
     ///      silently, so without it an undeployed registry turns the apply into a reported no-op.
+    /// @dev The object's `domain()` read is the first thing the leg does, and it fails to decode on
+    ///      a codeless address.
     function test_revertWhen_registryIsNotDeployed() public {
         address codeless = makeAddr("codelessRegistry");
 
-        vm.expectRevert(abi.encodeWithSelector(RegistryTargetHasNoCode.selector, codeless));
+        vm.expectRevert(bytes(""));
         vm.prank(ecosystemGovernor);
         coreExecutor.applyL1Upgrade(IProxyUpgradeTransition(codeless));
         assertEq(_liveImpl(bridgehubProxy), address(implOld), "a refused registry applies nothing");
+    }
+
+    /// @dev No code check of its own: OZ's `ERC1967Upgrade._setImplementation` refuses a codeless
+    ///      implementation, and the whole leg reverts with it.
+    function test_revertWhen_aRowImplementationHasNoCode() public {
+        vm.etch(address(implNew), "");
+        vm.expectRevert("ERC1967: new implementation is not a contract");
+        _applyL1Upgrade();
+        assertEq(_liveImpl(bridgehubProxy), address(implOld), "nothing is applied");
+    }
+
+    /// @dev An ownerless executor would strand the ProxyAdmin it holds.
+    function test_revertWhen_renouncingOwnership() public {
+        vm.prank(ecosystemGovernor);
+        vm.expectRevert(RenounceOwnershipDisabled.selector);
+        coreExecutor.renounceOwnership();
+        assertEq(coreExecutor.owner(), ecosystemGovernor, "the owner is kept");
+    }
+
+    // ─────────────────────────── malformed rows, where they are applied ───────────────────────────
+    // A row's shape is a review-time fact (protocol-ops `rows::verify_inventory`); the object pins
+    // any shape. These pin what each malformed row does on chain: it is skipped, or the leg reverts.
+
+    /// @dev Two rows chaining one proxy through two targets: the second swap lands, and the
+    ///      post-pass refuses the first row ending off its target (objlib-48, boot-47).
+    function test_revertWhen_aDuplicateProxyChainsThroughTwoTargets() public {
+        DummyImplC implNewer = new DummyImplC();
+        ProxyUpgradeRow[] memory rows = new ProxyUpgradeRow[](2);
+        rows[0] = _row(address(bridgehubProxy), address(implOld), address(implNew));
+        rows[1] = _row(address(bridgehubProxy), address(implNew), address(implNewer));
+        IProxyUpgradeTransition duplicate = _deployRegistry(rows);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ProxyUpgradeRowMismatch.selector,
+                address(bridgehubProxy),
+                address(implNew),
+                address(implNewer)
+            )
+        );
+        vm.prank(ecosystemGovernor);
+        coreExecutor.applyL1Upgrade(duplicate);
+        assertEq(_liveImpl(bridgehubProxy), address(implOld), "nothing of the leg stands");
+    }
+
+    /// @dev Two rows departing one source toward different targets: the second finds the proxy at
+    ///      the first's target.
+    function test_revertWhen_aDuplicateProxyDepartsTowardTwoTargets() public {
+        DummyImplC implOther = new DummyImplC();
+        ProxyUpgradeRow[] memory rows = new ProxyUpgradeRow[](2);
+        rows[0] = _row(address(bridgehubProxy), address(implOld), address(implNew));
+        rows[1] = _row(address(bridgehubProxy), address(implOld), address(implOther));
+        IProxyUpgradeTransition duplicate = _deployRegistry(rows);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ProxyUpgradeRowMismatch.selector,
+                address(bridgehubProxy),
+                address(implOld),
+                address(implNew)
+            )
+        );
+        vm.prank(ecosystemGovernor);
+        coreExecutor.applyL1Upgrade(duplicate);
+        assertEq(_liveImpl(bridgehubProxy), address(implOld), "nothing of the leg stands");
+    }
+
+    /// @dev The same row twice is idempotent: the second is skipped, and the post-pass holds.
+    function test_anIdenticalDuplicateRowIsHarmless() public {
+        ProxyUpgradeRow[] memory rows = new ProxyUpgradeRow[](2);
+        rows[0] = _row(address(bridgehubProxy), address(implOld), address(implNew));
+        rows[1] = rows[0];
+        IProxyUpgradeTransition duplicate = _deployRegistry(rows);
+
+        vm.recordLogs();
+        vm.prank(ecosystemGovernor);
+        coreExecutor.applyL1Upgrade(duplicate);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        uint256 swaps = 0;
+        for (uint256 i = 0; i < logs.length; ++i) {
+            if (logs[i].topics[0] == ProxyUpgradeRowLib.ProxyImplementationUpgraded.selector) {
+                ++swaps;
+            }
+        }
+        assertEq(swaps, 1, "the proxy is swapped once");
+        assertEq(_liveImpl(bridgehubProxy), address(implNew));
+    }
+
+    /// @dev A self-edge (`implNew == expectedOldImpl`) never moves its proxy: skipped when the proxy
+    ///      is there, refused otherwise (objlib-47).
+    function test_aSelfEdgeRowNeverMovesItsProxy() public {
+        ProxyUpgradeRow[] memory rows = new ProxyUpgradeRow[](1);
+        rows[0] = _row(address(bridgehubProxy), address(implOld), address(implOld));
+        IProxyUpgradeTransition here = _deployRegistry(rows);
+        vm.prank(ecosystemGovernor);
+        coreExecutor.applyL1Upgrade(here);
+        assertEq(_liveImpl(bridgehubProxy), address(implOld), "skipped");
+
+        rows[0] = _row(address(bridgehubProxy), address(implNew), address(implNew));
+        IProxyUpgradeTransition elsewhere = _deployRegistry(rows);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ProxyUpgradeRowMismatch.selector,
+                address(bridgehubProxy),
+                address(implNew),
+                address(implOld)
+            )
+        );
+        vm.prank(ecosystemGovernor);
+        coreExecutor.applyL1Upgrade(elsewhere);
+    }
+
+    /// @dev A zero proxy cannot be read through the ProxyAdmin (objlib-44); a zero source never
+    ///      matches a live implementation (objlib-45).
+    function test_revertWhen_aRowHasAZeroField() public {
+        ProxyUpgradeRow[] memory rows = new ProxyUpgradeRow[](1);
+        rows[0] = _row(address(0), address(implOld), address(implNew));
+        IProxyUpgradeTransition zeroProxy = _deployRegistry(rows);
+        vm.expectRevert(bytes(""));
+        vm.prank(ecosystemGovernor);
+        coreExecutor.applyL1Upgrade(zeroProxy);
+
+        rows[0] = _row(address(bridgehubProxy), address(0), address(implNew));
+        IProxyUpgradeTransition zeroSource = _deployRegistry(rows);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ProxyUpgradeRowMismatch.selector,
+                address(bridgehubProxy),
+                address(0),
+                address(implOld)
+            )
+        );
+        vm.prank(ecosystemGovernor);
+        coreExecutor.applyL1Upgrade(zeroSource);
+        assertEq(_liveImpl(bridgehubProxy), address(implOld));
     }
 
     function test_revertWhen_replayingStaleRegistryWouldDowngrade() public {

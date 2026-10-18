@@ -16,29 +16,16 @@ import {ICTMRelease} from "../upgrades/registry/objects/ICTMRelease.sol";
 import {ICTMTransition} from "../upgrades/registry/objects/ICTMTransition.sol";
 import {CTMUpgradeComposer} from "../upgrades/registry/libraries/CTMUpgradeComposer.sol";
 import {L2PlanLib} from "../upgrades/registry/libraries/L2PlanLib.sol";
-import {ObjectAnchorLib} from "../upgrades/registry/libraries/ObjectAnchorLib.sol";
 import {BytecodesSupplier} from "../upgrades/BytecodesSupplier.sol";
 import {IZKChain} from "./chain-interfaces/IZKChain.sol";
 import {FeeParams} from "./chain-deps/ZKChainStorage.sol";
 import {Ownable2StepUpgradeable} from "@openzeppelin/contracts-upgradeable-v4/access/Ownable2StepUpgradeable.sol";
-import {
-    DEFAULT_L2_LOGS_TREE_ROOT_HASH,
-    EMPTY_STRING_KECCAK,
-    GENESIS_BATCH_COMMITMENT,
-    L2_TO_L1_LOG_SERIALIZE_SIZE
-} from "../common/Config.sol";
-import {
-    AdminZero,
-    LegacyCutForRegistryDrivenVersion,
-    OutdatedProtocolVersion,
-    TransitionDeadlineMismatch,
-    UpgradeTransitionUnchanged
-} from "./L1StateTransitionErrors.sol";
+import {DEFAULT_L2_LOGS_TREE_ROOT_HASH, EMPTY_STRING_KECCAK, GENESIS_BATCH_COMMITMENT} from "../common/Config.sol";
+import {AdminZero, LegacyCutForRegistryDrivenVersion, OutdatedProtocolVersion} from "./L1StateTransitionErrors.sol";
 import {ProtocolVersionTooSmall} from "../upgrades/ZkSyncUpgradeErrors.sol";
 import {
     ChainAlreadyLive,
     NoCommittedUpgradeCutForVersion,
-    ReleaseProtocolVersionMismatch,
     TransitionNotCommitted,
     TransitionReleaseMismatch,
     Unauthorized,
@@ -187,10 +174,6 @@ contract ChainTypeManager is IChainTypeManager, ReentrancyGuard, Ownable2StepUpg
         PERMISSIONLESS_VALIDATOR = _permissionlessValidator;
         L1_INTEROP_FEE_MANAGER = _l1InteropFeeManager;
 
-        // While this does not provide a protection in the production, it is needed for local testing
-        // Length of the L2Log encoding should not be equal to the length of other L2Logs' tree nodes preimages
-        assert(L2_TO_L1_LOG_SERIALIZE_SIZE != 2 * 32);
-
         _disableInitializers();
     }
 
@@ -256,15 +239,6 @@ contract ChainTypeManager is IChainTypeManager, ReentrancyGuard, Ownable2StepUpg
         if (_initializeData.owner == address(0)) {
             revert ZeroAddress();
         }
-        if (_initializeData.validatorTimelock == address(0)) {
-            revert ZeroAddress();
-        }
-        if (_initializeData.serverNotifier == address(0)) {
-            revert ZeroAddress();
-        }
-        if (_initializeData.currentRelease == address(0)) {
-            revert ZeroAddress();
-        }
         _transferOwnership(_initializeData.owner);
 
         // The CTM starts at its genesis release's version. No deadline write: the current version
@@ -278,22 +252,11 @@ contract ChainTypeManager is IChainTypeManager, ReentrancyGuard, Ownable2StepUpg
     }
 
     /// @dev THE single point every release passes through — initialization, every transition and
-    ///      the bootstrap edge, each right after it moved `protocolVersion`: the release's own check
-    ///      surface, then its version. The genesis params need no check here: a release refuses a
-    ///      zero genesis batch hash at construction and a codeless genesis upgrade in `validate()`.
-    /// @dev The release is the one governance approved; its construction is verified off-chain,
-    ///      not here — see "Provenance and validation" in {docs/registry-driven-upgrades.md}.
+    ///      the bootstrap edge, each right after it moved `protocolVersion` to the release's own
+    ///      version — and the only place a release's `validate()` runs; see
+    ///      {protocol-docs/ecosystem-upgrade.md#where-each-check-lives}.
     function _setCurrentRelease(address _release) internal {
-        if (_release == address(0)) {
-            revert ZeroAddress();
-        }
-        ICTMRelease release = ICTMRelease(_release);
-        release.validate();
-        uint256 releaseProtocolVersion = release.protocolVersion();
-        if (releaseProtocolVersion != protocolVersion) {
-            revert ReleaseProtocolVersionMismatch(protocolVersion, releaseProtocolVersion);
-        }
-
+        ICTMRelease(_release).validate();
         currentRelease = _release;
         emit NewCurrentRelease(protocolVersion, _release);
     }
@@ -365,7 +328,7 @@ contract ChainTypeManager is IChainTypeManager, ReentrancyGuard, Ownable2StepUpg
 
     /// @dev set ServerNotifier.
     /// @param _serverNotifier the new serverNotifier address
-    function setServerNotifier(address _serverNotifier) external onlyOwnerOrAdmin {
+    function setServerNotifier(address _serverNotifier) external onlyOwner {
         address oldServerNotifier = serverNotifierAddress;
         serverNotifierAddress = _serverNotifier;
         emit NewServerNotifier(oldServerNotifier, _serverNotifier);
@@ -387,6 +350,7 @@ contract ChainTypeManager is IChainTypeManager, ReentrancyGuard, Ownable2StepUpg
         if (fromRelease != currentRelease) {
             revert TransitionReleaseMismatch(fromRelease, currentRelease);
         }
+        _requireExecutable(_transition);
         uint256 oldProtocolVersion = _transition.oldProtocolVersion();
         uint256 newProtocolVersion = _transition.newProtocolVersion();
         _commitVersionEdge(oldProtocolVersion, newProtocolVersion);
@@ -400,31 +364,31 @@ contract ChainTypeManager is IChainTypeManager, ReentrancyGuard, Ownable2StepUpg
     /// @inheritdoc IChainTypeManager
     /// @dev The recovery invariant this preserves is stated once in
     ///      {protocol-docs/ecosystem-upgrade-coordination.md#replacing-a-committed-transition}.
-    ///      Unlike a commit it moves neither `protocolVersion` nor `currentRelease`. The bytecode
-    ///      publication the executor checks before a commit is checked here, because this path is
-    ///      reached through the executor's `forward`.
+    ///      Unlike a commit it moves neither `protocolVersion` nor `currentRelease`.
     function replaceUpgradeTransition(
         ICTMTransition _expectedTransition,
         ICTMTransition _replacement
     ) external onlyOwner {
-        ObjectAnchorLib.requireCode(address(_expectedTransition));
-        ObjectAnchorLib.requireCode(address(_replacement));
         uint256 oldProtocolVersion = _expectedTransition.oldProtocolVersion();
         address committed = upgradeTransition[oldProtocolVersion];
         if (committed != address(_expectedTransition)) {
             revert TransitionNotCommitted(address(_expectedTransition), committed);
         }
-        if (address(_replacement) == committed) {
-            revert UpgradeTransitionUnchanged(committed);
-        }
-        _replacement.validate();
+        _requireExecutable(_replacement);
         _requireSameDeparture(_expectedTransition, _replacement);
-        _requireSameDeadline(_expectedTransition, _replacement);
-        _requireOnwardDestination(_expectedTransition, _replacement);
-        L2PlanLib.requirePublished(BytecodesSupplier(L1_BYTECODES_SUPPLIER), _replacement.l2Plan().factoryDepHashes);
+        _requireOnwardDestination(_replacement);
 
         emit UpgradeTransitionReplaced(oldProtocolVersion, committed, address(_replacement));
         _recordTransition(oldProtocolVersion, _replacement.newProtocolVersion(), _replacement);
+    }
+
+    /// @dev What every transition this CTM commits — first or as a replacement — needs from the
+    ///      state at execution: the code it names, and every L2 bytecode its plan depends on
+    ///      published on the supplier, or the committed edge fails on every chain's L2 leg.
+    /// @param _transition The transition about to be committed.
+    function _requireExecutable(ICTMTransition _transition) private view {
+        _transition.validate();
+        L2PlanLib.requirePublished(BytecodesSupplier(L1_BYTECODES_SUPPLIER), _transition.l2Plan().factoryDepHashes);
     }
 
     /// @dev Records `_transition` as THE commitment for chains departing `_oldProtocolVersion`.
@@ -453,30 +417,14 @@ contract ChainTypeManager is IChainTypeManager, ReentrancyGuard, Ownable2StepUpg
         }
     }
 
-    /// @dev Deadline changes use {setProtocolVersionDeadline} explicitly.
-    /// @param _expectedTransition The transition being replaced.
-    /// @param _replacement Its replacement.
-    function _requireSameDeadline(ICTMTransition _expectedTransition, ICTMTransition _replacement) private view {
-        uint256 deadline = _expectedTransition.oldProtocolVersionDeadline();
-        uint256 replacementDeadline = _replacement.oldProtocolVersionDeadline();
-        if (replacementDeadline != deadline) {
-            revert TransitionDeadlineMismatch(deadline, replacementDeadline);
-        }
-    }
-
-    /// @dev A replacement lands no earlier than the replaced transition, on a release a chain can
-    ///      continue from: the current release at the current version, otherwise the source
-    ///      release of the edge committed onward from its version — which also bounds it by the
-    ///      CTM's version, since nothing departs a version the CTM has not reached. A different
-    ///      release object at a committed version number is refused either way.
-    /// @param _expectedTransition The transition being replaced.
-    /// @param _replacement Its replacement.
-    function _requireOnwardDestination(ICTMTransition _expectedTransition, ICTMTransition _replacement) private view {
+    /// @dev A replacement lands on a release a chain can continue from: the current release at the
+    ///      current version, otherwise the source release of the edge committed onward from its
+    ///      version — which also bounds it by the CTM's version, since nothing departs a version
+    ///      the CTM has not reached. A different release object at a committed version number is
+    ///      refused either way.
+    /// @param _replacement The replacement.
+    function _requireOnwardDestination(ICTMTransition _replacement) private view {
         uint256 targetVersion = _replacement.newProtocolVersion();
-        uint256 replacedTargetVersion = _expectedTransition.newProtocolVersion();
-        if (targetVersion < replacedTargetVersion) {
-            revert ProtocolVersionTooSmall(replacedTargetVersion, targetVersion);
-        }
         address destination = _replacement.newRelease();
         address continuation;
         if (targetVersion == protocolVersion) {
@@ -571,13 +519,10 @@ contract ChainTypeManager is IChainTypeManager, ReentrancyGuard, Ownable2StepUpg
     ///         transition committed for that edge ({upgradeTransition}).
     /// @dev Nothing is stored and nothing is handed to the chain by its caller: the transition is
     ///      the only commitment, and the cut is recomputed from it here — the same derivation
-    ///      {setNewVersionUpgradeFromTransition} hashed at commit time.
+    ///      {setNewVersionUpgradeFromTransition} hashed at commit time. Reverts without data when
+    ///      nothing is committed for `_oldProtocolVersion`.
     function upgradeCutForVersion(uint256 _oldProtocolVersion) public view returns (Diamond.DiamondCutData memory) {
-        address transition = upgradeTransition[_oldProtocolVersion];
-        if (transition == address(0)) {
-            revert NoCommittedUpgradeCutForVersion(_oldProtocolVersion);
-        }
-        return _transitionUpgradeCut(ICTMTransition(transition));
+        return _transitionUpgradeCut(ICTMTransition(upgradeTransition[_oldProtocolVersion]));
     }
 
     /// @dev The cut is a pure function of the transition: no facet cuts of its own, just the
@@ -771,9 +716,6 @@ contract ChainTypeManager is IChainTypeManager, ReentrancyGuard, Ownable2StepUpg
         uint256 _oldProtocolVersionDeadline,
         address _newRelease
     ) external onlyOwner {
-        if (_newRelease == address(0)) {
-            revert ZeroAddress();
-        }
         uint256 newProtocolVersion = ICTMRelease(_newRelease).protocolVersion();
         _commitVersionEdge(_oldProtocolVersion, newProtocolVersion);
         // The departing version has no transition to resolve a deadline from, so the deadline is

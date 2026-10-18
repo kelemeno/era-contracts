@@ -5,9 +5,10 @@
 //! The replacement is an ordinary write-once `CTMTransition`, so its identity is checked exactly
 //! as an upgrade's transition leg is ([`super::upgrade::verify_transition`]). What it is HELD
 //! AGAINST differs: not the CTM's current release, but the transition it replaces and the onward
-//! path — the CTM's own compare-and-replace checks, judged over live reads before governance
-//! signs ([`judge_replacement_state`]). It lands on an existing release, so it deploys none and
-//! no genesis is judged here; the destination is checked to BE the continuation release.
+//! path — the CTM's own compare-and-replace checks plus the policy only this review holds,
+//! judged over live reads before governance signs ([`judge_replacement_state`]). It lands on an
+//! existing release, so it deploys none and no genesis is judged here; the destination is checked
+//! to BE the continuation release.
 
 use std::collections::BTreeMap;
 
@@ -27,7 +28,9 @@ use super::lifecycle::{
 use super::package::{DeadlineChange, RecoveredReplacement, ReplacementPackage};
 use super::provenance::{expect_code_present, tolerate};
 use super::shell::verify_shell_kept;
-use super::upgrade::{cross_check, verify_bytecodes_published, verify_transition, ArrivingRelease};
+use super::upgrade::{
+    cross_check, verify_bytecodes_published, verify_transition, ArrivingRelease, Publication,
+};
 use super::views::{CTMTransitionView, CtmView};
 
 /// Verify a transition replacement against the live L1 it targets.
@@ -206,7 +209,17 @@ pub(crate) async fn verify<P: Provider>(
 
     // ── 4. Readiness ──
     result.print_info("\n== Readiness ==");
-    verify_bytecodes_published(provider, result, &ctm, forward.replacement).await?;
+    verify_bytecodes_published(
+        provider,
+        result,
+        &ctm,
+        Publication {
+            object: forward.replacement,
+            label: "the replacement",
+            required_by: "`ChainTypeManager.replaceUpgradeTransition`",
+        },
+    )
+    .await?;
 
     // ── 5. The L2 proxy logic chains crossing the edge keep ──
     if let Some(edge) = &replacement_edge {
@@ -271,8 +284,9 @@ pub(super) struct ReplacementFacts {
     pub(super) deadline_change: Option<DeadlineChange>,
 }
 
-/// The CTM's replacement checks over live facts, plus the deadline report. Every refusal the CTM
-/// would revert with is an ERROR here.
+/// The CTM's replacement checks over live facts, the replacement policy the CTM does not hold
+/// (a replacement that changes something, keeps the pinned deadline and lands no earlier), and the
+/// deadline report. Each is an ERROR here.
 pub(super) fn judge_replacement_state(result: &mut VerificationResult, facts: &ReplacementFacts) {
     let expected = &facts.expected;
     let replacement = &facts.replacement;
@@ -297,8 +311,9 @@ pub(super) fn judge_replacement_state(result: &mut VerificationResult, facts: &R
     }
     if replacement.address == expected.address {
         result.report_error(
-            "the replacement IS the transition it replaces: `replaceUpgradeTransition` reverts \
-             (`UpgradeTransitionUnchanged`)",
+            "the replacement IS the transition it replaces: the CTM accepts it as a no-op \
+             re-commit, but a replacement that changes nothing repairs nothing and only re-emits \
+             the commitment",
         );
     }
     if expected.old_version < facts.ctm_version {
@@ -335,8 +350,9 @@ pub(super) fn judge_replacement_state(result: &mut VerificationResult, facts: &R
         ));
     } else {
         result.report_error(&format!(
-            "the replacement pins deadline {} but the replaced transition {}: a deadline change \
-             is a separate `setProtocolVersionDeadline` (`TransitionDeadlineMismatch`)",
+            "the replacement pins deadline {} but the replaced transition {}: the CTM accepts it, \
+             and without a stored override the departure's effective deadline silently becomes \
+             the new pin — a deadline change belongs in an explicit `setProtocolVersionDeadline`",
             format_deadline(replacement.deadline),
             format_deadline(expected.deadline)
         ));
@@ -351,8 +367,9 @@ pub(super) fn judge_replacement_state(result: &mut VerificationResult, facts: &R
         ));
     } else {
         result.report_error(&format!(
-            "the replacement lands at {target}, earlier than the replaced {} \
-             (`ProtocolVersionTooSmall`)",
+            "the replacement lands at {target}, earlier than the replaced {}: the CTM accepts a \
+             lower target (only the replacement's own edge must move forward), but a repair must \
+             not move the departure's destination backwards",
             format_semver(expected.new_version)
         ));
     }
@@ -809,11 +826,25 @@ mod tests {
         assert_eq!(judge(&facts).errors, 1);
     }
 
+    /// The three replacement rules the CTM no longer refuses stay errors here, and their reports
+    /// cite no on-chain refusal: each is this review's policy alone.
+    fn assert_policy_error(result: &VerificationResult, needle: &str) {
+        assert_eq!(result.errors, 1, "{:?}", result.error_messages);
+        assert!(result.has_error(needle), "{:?}", result.error_messages);
+        for removed in [
+            "UpgradeTransitionUnchanged",
+            "TransitionDeadlineMismatch",
+            "ProtocolVersionTooSmall",
+        ] {
+            assert!(!result.has_error(removed), "{:?}", result.error_messages);
+        }
+    }
+
     #[test]
     fn a_replacement_identical_to_the_expected_fails() {
         let mut facts = facts();
         facts.replacement.address = T34;
-        assert_eq!(judge(&facts).errors, 1);
+        assert_policy_error(&judge(&facts), "the CTM accepts it as a no-op re-commit");
     }
 
     /// The source is the replaced transition's release, NOT the CTM's current release: a
@@ -829,7 +860,7 @@ mod tests {
     fn a_replacement_pinning_another_deadline_fails() {
         let mut facts = facts();
         facts.replacement.deadline = v(DEADLINE + 1);
-        assert_eq!(judge(&facts).errors, 1);
+        assert_policy_error(&judge(&facts), "silently becomes the new pin");
     }
 
     /// Lower than what it replaces, even onto a release a chain could continue from.
@@ -839,7 +870,7 @@ mod tests {
         facts.replacement.new_version = v(V34 + 1);
         facts.replacement.new_release = Address::repeat_byte(0x3F);
         facts.onward = Some((Address::repeat_byte(0xAF), Some(Address::repeat_byte(0x3F))));
-        assert_eq!(judge(&facts).errors, 1);
+        assert_policy_error(&judge(&facts), "the CTM accepts a lower target");
     }
 
     /// Landing on a release the onward edge does not depart from: chains would be stranded.
@@ -909,10 +940,22 @@ mod tests {
         let published = (B256::repeat_byte(0x01), Some(v(17)));
         let unpublished = (B256::repeat_byte(0x02), Some(U256::ZERO));
         let mut result = VerificationResult::default();
-        judge_bytecode_publication(&mut result, supplier, &[published, unpublished]);
+        let required_by = "`ChainTypeManager.replaceUpgradeTransition`";
+        judge_bytecode_publication(
+            &mut result,
+            supplier,
+            &[published, unpublished],
+            required_by,
+        );
         assert_eq!(result.errors, 1);
+        assert!(result.has_error("`ChainTypeManager.replaceUpgradeTransition` refuses it"));
         let mut result = VerificationResult::default();
-        judge_bytecode_publication(&mut result, supplier, &[published, (B256::ZERO, None)]);
+        judge_bytecode_publication(
+            &mut result,
+            supplier,
+            &[published, (B256::ZERO, None)],
+            required_by,
+        );
         assert_eq!(
             result.errors, 0,
             "an unreadable block was reported when read"

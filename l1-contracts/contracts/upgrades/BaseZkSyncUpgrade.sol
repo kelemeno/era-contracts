@@ -8,21 +8,18 @@ import {ZKChainBase} from "../state-transition/chain-deps/facets/ZKChainBase.sol
 import {IVerifier} from "../state-transition/chain-interfaces/IVerifier.sol";
 import {TransactionValidator} from "../state-transition/libraries/TransactionValidator.sol";
 import {Diamond} from "../state-transition/libraries/Diamond.sol";
-import {MAX_ALLOWED_MINOR_VERSION_DELTA, MAX_NEW_FACTORY_DEPS, UPGRADE_TX_MAX_GAS_LIMIT} from "../common/Config.sol";
+import {UPGRADE_TX_MAX_GAS_LIMIT} from "../common/Config.sol";
 import {L2CanonicalTransaction} from "../common/Messaging.sol";
 import {
     InvalidTxType,
     L2UpgradeNonceNotEqualToNewProtocolVersion,
-    NewProtocolMajorVersionNotZero,
     PatchCantSetUpgradeTxn,
-    PreviousProtocolMajorVersionNotZero,
     PreviousUpgradeNotCleaned,
     PreviousUpgradeNotFinalized,
-    ProtocolVersionMinorDeltaTooBig,
     ProtocolVersionTooSmall,
     SettlementLayerUpgradeMustPrecedeChainUpgrade
 } from "./ZkSyncUpgradeErrors.sol";
-import {TimeNotReached, TooManyFactoryDeps, ZeroAddress} from "../common/L1ContractErrors.sol";
+import {TimeNotReached} from "../common/L1ContractErrors.sol";
 import {NotAllBatchesExecuted} from "../state-transition/L1StateTransitionErrors.sol";
 import {SemVer} from "../common/libraries/SemVer.sol";
 import {IZKChain} from "../state-transition/chain-interfaces/IZKChain.sol";
@@ -129,10 +126,6 @@ abstract contract BaseZkSyncUpgrade is ZKChainBase {
         // during the transition. If verifier is upgraded, it will immediately be used to prove all committed batches.
         // Batches committed expecting the old verifier will fail. Ensure all committed batches are finalized before the
         // verifier is upgraded.
-        if (_newVerifier == IVerifier(address(0))) {
-            revert ZeroAddress();
-        }
-
         IVerifier oldVerifier = s.verifier;
         s.verifier = _newVerifier;
         emit NewVerifier(address(oldVerifier), address(_newVerifier));
@@ -178,8 +171,6 @@ abstract contract BaseZkSyncUpgrade is ZKChainBase {
             revert L2UpgradeNonceNotEqualToNewProtocolVersion(_l2ProtocolUpgradeTx.nonce, _newMinorProtocolVersion);
         }
 
-        _verifyFactoryDeps(_l2ProtocolUpgradeTx.factoryDeps);
-
         bytes32 l2ProtocolUpgradeTxHash = keccak256(encodedTransaction);
 
         s.l2SystemContractsUpgradeTxHash = l2ProtocolUpgradeTxHash;
@@ -187,20 +178,11 @@ abstract contract BaseZkSyncUpgrade is ZKChainBase {
         return l2ProtocolUpgradeTxHash;
     }
 
-    /// @notice Verifies that the factory deps provided are in the correct format
-    /// @param _hashes The list of hashes of factory deps
-    /// @dev Note, that unlike normal L1->L2 transactions, factory dependencies for
-    /// an upgrade transaction should be made available prior to the upgrade via publishing those
-    /// to the `BytecodesSupplier` contract.
-    function _verifyFactoryDeps(uint256[] memory _hashes) private pure {
-        if (_hashes.length > MAX_NEW_FACTORY_DEPS) {
-            revert TooManyFactoryDeps();
-        }
-    }
-
     /// @notice Changes the protocol version
     /// @param _newProtocolVersion The new protocol version
     /// @param _isOnSettlementLayer Whether the chain settles on the current settlement layer.
+    /// @dev The major and minor-delta rules of the edge are enforced where the edge is committed
+    ///      (`VersionEdgeLib`), and the chain only crosses an edge departing its own version.
     function _setNewProtocolVersion(
         uint256 _newProtocolVersion,
         bool _isOnSettlementLayer
@@ -210,32 +192,10 @@ abstract contract BaseZkSyncUpgrade is ZKChainBase {
             revert ProtocolVersionTooSmall(previousProtocolVersion, _newProtocolVersion);
         }
         // slither-disable-next-line unused-return
-        (uint32 previousMajorVersion, uint32 previousMinorVersion, ) = SemVer.unpackSemVer(
-            SafeCast.toUint96(previousProtocolVersion)
-        );
-        if (previousMajorVersion != 0) {
-            revert PreviousProtocolMajorVersionNotZero();
-        }
-
-        uint32 newMajorVersion;
+        (, uint32 previousMinorVersion, ) = SemVer.unpackSemVer(SafeCast.toUint96(previousProtocolVersion));
         // slither-disable-next-line unused-return
-        (newMajorVersion, newMinorVersion, ) = SemVer.unpackSemVer(SafeCast.toUint96(_newProtocolVersion));
-        if (newMajorVersion != 0) {
-            revert NewProtocolMajorVersionNotZero();
-        }
-
-        // Since `_newProtocolVersion > previousProtocolVersion`, and both old and new major version is 0,
-        // the difference between minor versions is >= 0.
-        uint256 minorDelta = newMinorVersion - previousMinorVersion;
-
-        if (minorDelta == 0) {
-            patchOnly = true;
-        }
-
-        // While this is implicitly enforced by other checks above, we still double check just in case
-        if (minorDelta > MAX_ALLOWED_MINOR_VERSION_DELTA) {
-            revert ProtocolVersionMinorDeltaTooBig(MAX_ALLOWED_MINOR_VERSION_DELTA, minorDelta);
-        }
+        (, newMinorVersion, ) = SemVer.unpackSemVer(SafeCast.toUint96(_newProtocolVersion));
+        patchOnly = newMinorVersion == previousMinorVersion;
 
         // If the minor version changes also, we need to ensure that the previous upgrade has been finalized.
         // In case the minor version does not change, we permit to keep the old upgrade transaction in the system, but it

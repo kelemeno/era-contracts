@@ -370,6 +370,8 @@ contract DeployCTMScript is Script, DeployCTMUtils, IDeployCTM {
         address ctmProxyAdmin = ctmAddresses.admin.transparentProxyAdmin;
         address notifier = ctmAddresses.stateTransition.proxies.serverNotifier;
         address governance = _ecosystemGovernance();
+        // The executor's bindings are immutable and the constructor does not refuse zero ones.
+        require(ctm != address(0) && ctmProxyAdmin != address(0), "CTM or its ProxyAdmin not deployed");
         CTMUpgradeExecutor executor = CTMUpgradeExecutor(
             payable(
                 deployViaCreate2AndNotify(

@@ -2,17 +2,18 @@
 
 pragma solidity 0.8.28;
 
-import {TransparentUpgradeableProxy} from "@openzeppelin/contracts-v4/proxy/transparent/TransparentUpgradeableProxy.sol";
+import {
+    ITransparentUpgradeableProxy,
+    TransparentUpgradeableProxy
+} from "@openzeppelin/contracts-v4/proxy/transparent/TransparentUpgradeableProxy.sol";
 
 import {CTMUpgradeExecutorFixture} from "./CTMUpgradeExecutor.t.sol";
-import {CTMRelease} from "contracts/upgrades/registry/objects/CTMRelease.sol";
 import {CTMTransition} from "contracts/upgrades/registry/objects/CTMTransition.sol";
 import {ProxyUpgradeTransition} from "contracts/upgrades/registry/objects/ProxyUpgradeTransition.sol";
 import {RegistryTargetHasNoCode} from "contracts/common/L1ContractErrors.sol";
 import {ProxyUpgradeRow, ReleaseManifest, TransitionManifest} from "contracts/upgrades/registry/RegistryTypes.sol";
 
-/// @dev The check surface every write-once registry object exposes, so one helper can drive a
-///      release, a transition and a proxy upgrade transition of either domain alike.
+/// @dev The check surface of the write-once objects that keep one: a release and a transition.
 interface IValidatable {
     function validate() external view;
 }
@@ -30,22 +31,22 @@ contract ValidateTargetNew {
     }
 }
 
-/// @notice `validate()` is the enforcement surface every write-once registry object exposes: it
-///         refuses a manifest naming a member that is not deployed code (see "Validation" in
-///         {docs/registry-driven-upgrades.md}). These tests enumerate every contract a release, a
-///         transition and a proxy upgrade transition of each domain name — the MANIFEST is the spec,
-///         not the objects' code — and check that emptying any ONE of them is refused with that
-///         member's own diagnostic, so no named member can be left unchecked.
+/// @notice Where "the named contract is deployed code" is enforced, member by member — the MANIFEST
+///         is the spec, not the objects' code. A release's `validate()` (run once, when the CTM
+///         installs it) covers its own members; a transition's covers only the code it names itself
+///         (engine, composer); a proxy upgrade transition has no check of its own, and applying a
+///         row to a codeless implementation is refused by OZ's ERC1967 upgrade. See
+///         {protocol-docs/ecosystem-upgrade.md#where-each-check-lives}.
 /// @dev The transition under test names its optional delegate composer, so the full list is
 ///      exercised.
 contract CodePresenceSurfacesTest is CTMUpgradeExecutorFixture {
     /// @dev `diamondInit`, `genesisUpgrade`, `verifier` — the release members that are not facets.
     uint256 internal constant RELEASE_FIXED_MEMBERS = 3;
-    /// @dev `upgradeEngine` — the only fixed transition member every manifest carries.
-    uint256 internal constant TRANSITION_FIXED_MEMBERS = 1;
 
     address internal implOld;
     address internal implNew;
+    TransparentUpgradeableProxy internal ecosystemProxy;
+    TransparentUpgradeableProxy internal ctmDomainProxy;
     ProxyUpgradeTransition internal coreTransition;
     ProxyUpgradeTransition internal infrastructure;
     CTMTransition internal fullTransition;
@@ -55,19 +56,11 @@ contract CodePresenceSurfacesTest is CTMUpgradeExecutorFixture {
         implOld = address(new ValidateTargetOld());
         implNew = address(new ValidateTargetNew());
 
-        TransparentUpgradeableProxy ecosystemProxy = new TransparentUpgradeableProxy(
-            implOld,
-            address(ecosystemProxyAdmin),
-            hex""
-        );
+        ecosystemProxy = new TransparentUpgradeableProxy(implOld, address(ecosystemProxyAdmin), hex"");
         coreTransition = _deployCoreTransition(_row(address(ecosystemProxy)));
 
         fullTransition = _deployTransition(777);
-        TransparentUpgradeableProxy ctmDomainProxy = new TransparentUpgradeableProxy(
-            implOld,
-            address(ctmProxyAdmin),
-            hex""
-        );
+        ctmDomainProxy = new TransparentUpgradeableProxy(implOld, address(ctmProxyAdmin), hex"");
         infrastructure = _deployCTMInfrastructureTransition(_row(address(ctmDomainProxy)));
     }
 
@@ -76,8 +69,6 @@ contract CodePresenceSurfacesTest is CTMUpgradeExecutorFixture {
     function test_freshObjectsValidate() public view {
         IValidatable(address(release)).validate();
         IValidatable(address(fullTransition)).validate();
-        IValidatable(address(coreTransition)).validate();
-        IValidatable(address(infrastructure)).validate();
     }
 
     /// @dev The optional-zero member stays legal: a transition with no composer still validates,
@@ -95,38 +86,71 @@ contract CodePresenceSurfacesTest is CTMUpgradeExecutorFixture {
 
     // ─────────────────────────────── every named member ───────────────────────────────
 
+    /// @dev The fixed members carry their own diagnostic. A facet is READ (`selectors()`), and a
+    ///      codeless one fails that read without data — covered where the facets are real
+    ///      contracts (`ReleaseFacetRows.t.sol`, `StorageRegistries.t.sol`); this fixture's facets
+    ///      answer through mocks.
     function test_everyReleaseMemberIsRequiredToHaveCode() public {
-        address[] memory members = _releaseMembers(release.getManifest());
-        assertEq(
-            members.length,
-            RELEASE_FIXED_MEMBERS + facetCuts.length,
-            "the fixture release names its full facet set"
-        );
-        for (uint256 i = 0; i < members.length; ++i) {
-            _assertCodelessMemberIsRefused(IValidatable(address(release)), members[i]);
+        ReleaseManifest memory m = release.getManifest();
+        address[RELEASE_FIXED_MEMBERS] memory fixedMembers = [m.diamondInit, m.genesisUpgrade, m.verifier];
+        for (uint256 i = 0; i < RELEASE_FIXED_MEMBERS; ++i) {
+            _assertCodelessMemberIsRefused(
+                IValidatable(address(release)),
+                fixedMembers[i],
+                abi.encodeWithSelector(RegistryTargetHasNoCode.selector, fixedMembers[i])
+            );
         }
     }
 
-    /// @dev A transition's list is its own members plus BOTH release edges' lists: an emptied
-    ///      member of either release must surface through the transition too.
+    /// @dev A transition names the engine and the composer; each must be code.
     function test_everyTransitionMemberIsRequiredToHaveCode() public {
-        address[] memory members = _transitionMembers(fullTransition.getManifest());
+        TransitionManifest memory m = fullTransition.getManifest();
+        assertTrue(m.l2Plan.delegateComposer != address(0), "the fixture transition names a composer");
+        address[2] memory members = [m.upgradeEngine, m.l2Plan.delegateComposer];
         for (uint256 i = 0; i < members.length; ++i) {
-            _assertCodelessMemberIsRefused(IValidatable(address(fullTransition)), members[i]);
+            _assertCodelessMemberIsRefused(
+                IValidatable(address(fullTransition)),
+                members[i],
+                abi.encodeWithSelector(RegistryTargetHasNoCode.selector, members[i])
+            );
         }
     }
 
-    /// @dev A proxy upgrade transition of either domain names exactly its participating rows'
-    ///      implementations.
-    function test_everyProxyUpgradeTransitionRowIsRequiredToHaveCode() public {
-        ProxyUpgradeTransition[2] memory objects = [coreTransition, infrastructure];
-        for (uint256 o = 0; o < objects.length; ++o) {
-            ProxyUpgradeRow[] memory rows = objects[o].rows();
-            assertEq(rows.length, 1, "one participating row");
-            for (uint256 i = 0; i < rows.length; ++i) {
-                _assertCodelessMemberIsRefused(IValidatable(address(objects[o])), rows[i].implNew);
-            }
-        }
+    /// @dev The releases are checked where they are installed, not again by every transition naming
+    ///      them: a transition still validates with a codeless member in either release.
+    function test_aTransitionDoesNotRecheckItsReleases() public {
+        address releaseMember = release.getManifest().genesisUpgrade;
+        vm.etch(releaseMember, "");
+        fullTransition.validate();
+        vm.expectRevert(abi.encodeWithSelector(RegistryTargetHasNoCode.selector, releaseMember));
+        release.validate();
+    }
+
+    /// @dev A proxy upgrade transition of either domain has no check surface of its own: a row whose
+    ///      implementation has no code is refused when the executor applies it, by OZ's
+    ///      `ERC1967Upgrade._setImplementation`, and nothing of the leg stands.
+    function test_aRowWithACodelessImplementationIsRefusedWhenApplied() public {
+        assertEq(coreTransition.rows()[0].implNew, implNew);
+        assertEq(infrastructure.rows()[0].implNew, implNew);
+        vm.etch(implNew, "");
+
+        vm.prank(governor);
+        vm.expectRevert("ERC1967: new implementation is not a contract");
+        coreExecutor.applyL1Upgrade(coreTransition);
+        assertEq(
+            ecosystemProxyAdmin.getProxyImplementation(ITransparentUpgradeableProxy(address(ecosystemProxy))),
+            implOld,
+            "the core row did not land"
+        );
+
+        vm.prank(governor);
+        vm.expectRevert("ERC1967: new implementation is not a contract");
+        ctmExecutor.applyInfrastructureUpgrade(infrastructure);
+        assertEq(
+            ctmProxyAdmin.getProxyImplementation(ITransparentUpgradeableProxy(address(ctmDomainProxy))),
+            implOld,
+            "the CTM row did not land"
+        );
     }
 
     // ─────────────────────────────── helpers ───────────────────────────────
@@ -136,45 +160,14 @@ contract CodePresenceSurfacesTest is CTMUpgradeExecutorFixture {
             ProxyUpgradeRow({proxy: _proxy, expectedOldImpl: implOld, implNew: implNew, callInitializeUpgrade: false});
     }
 
-    /// @dev What a release names, read off its manifest: DiamondInit, genesis upgrade, verifier,
-    ///      every genesis facet.
-    function _releaseMembers(ReleaseManifest memory _m) internal pure returns (address[] memory members) {
-        members = new address[](RELEASE_FIXED_MEMBERS + _m.genesisFacets.length);
-        members[0] = _m.diamondInit;
-        members[1] = _m.genesisUpgrade;
-        members[2] = _m.verifier;
-        for (uint256 i = 0; i < _m.genesisFacets.length; ++i) {
-            members[RELEASE_FIXED_MEMBERS + i] = _m.genesisFacets[i].facet;
-        }
-    }
-
-    /// @dev What a transition names, read off its manifest: engine, composer, and both release
-    ///      edges' own lists.
-    function _transitionMembers(TransitionManifest memory _m) internal view returns (address[] memory members) {
-        address[] memory newReleaseMembers = _releaseMembers(CTMRelease(_m.newRelease).getManifest());
-        address[] memory fromReleaseMembers = _releaseMembers(CTMRelease(_m.fromRelease).getManifest());
-        assertTrue(_m.l2Plan.delegateComposer != address(0), "the fixture transition names a composer");
-
-        members = new address[](TRANSITION_FIXED_MEMBERS + 1 + newReleaseMembers.length + fromReleaseMembers.length);
-        uint256 next = 0;
-        members[next++] = _m.upgradeEngine;
-        members[next++] = _m.l2Plan.delegateComposer;
-        for (uint256 i = 0; i < newReleaseMembers.length; ++i) {
-            members[next++] = newReleaseMembers[i];
-        }
-        for (uint256 i = 0; i < fromReleaseMembers.length; ++i) {
-            members[next++] = fromReleaseMembers[i];
-        }
-    }
-
-    /// @dev Empties `_member`'s code and checks `validate()` refuses it with that member's own
-    ///      diagnostic, then restores the state and checks the object validates again.
-    function _assertCodelessMemberIsRefused(IValidatable _object, address _member) internal {
+    /// @dev Empties `_member`'s code and checks `validate()` refuses it with `_error`, then restores
+    ///      the state and checks the object validates again.
+    function _assertCodelessMemberIsRefused(IValidatable _object, address _member, bytes memory _error) internal {
         assertTrue(_member.code.length != 0, "the fixture member must have code before it is emptied");
 
         uint256 snapshot = vm.snapshotState();
         vm.etch(_member, "");
-        vm.expectRevert(abi.encodeWithSelector(RegistryTargetHasNoCode.selector, _member));
+        vm.expectRevert(_error);
         _object.validate();
         assertTrue(vm.revertToState(snapshot), "restore the emptied member");
 

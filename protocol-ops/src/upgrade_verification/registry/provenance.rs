@@ -311,7 +311,7 @@ pub(crate) async fn expect_code_identity<P: Provider>(
 }
 
 /// Reports whether an address is a deployed contract at all — the precondition every object
-/// this package names has to meet, and the one the objects' own `validate()` enforces on-chain.
+/// this package names has to meet.
 pub(crate) async fn expect_code_present<P: Provider>(
     provider: &P,
     result: &mut VerificationResult,
@@ -326,7 +326,7 @@ pub(crate) async fn expect_code_present<P: Provider>(
     if code.is_empty() {
         result.report_error(&format!(
             "{label} at {address} has NO code: the object names an address nothing is deployed \
-             to, and `validate()` refuses it on-chain"
+             to"
         ));
         return Ok(false);
     }

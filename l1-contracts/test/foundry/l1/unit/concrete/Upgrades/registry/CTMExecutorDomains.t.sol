@@ -78,13 +78,23 @@ contract CTMExecutorDomainsTest is CTMUpgradeExecutorFixture {
         return new CTMUpgradeExecutor(governor, IChainTypeManager(address(chainContractAddress)), ctmProxyAdmin);
     }
 
-    function test_revertWhen_constructedOverAZeroCTMOrAdmin() public {
-        vm.expectRevert(ZeroAddress.selector);
-        new CTMUpgradeExecutor(governor, IChainTypeManager(address(0)), ctmProxyAdmin);
-        vm.expectRevert(ZeroAddress.selector);
-        new CTMUpgradeExecutor(governor, IChainTypeManager(address(chainContractAddress)), ProxyAdmin(address(0)));
+    /// @dev Only a zero OWNER is refused at construction: it would leave every entrypoint
+    ///      unreachable for good. The CTM and ProxyAdmin bindings are review-time facts checked
+    ///      off-chain, and an executor bound to nothing can apply nothing.
+    function test_revertWhen_constructedOverAZeroOwner() public {
         vm.expectRevert(ZeroAddress.selector);
         new CTMUpgradeExecutor(address(0), IChainTypeManager(address(chainContractAddress)), ctmProxyAdmin);
+    }
+
+    /// @dev An executor constructed over a zero CTM commits nothing: the commit's first read of the
+    ///      CTM reverts.
+    function test_anExecutorBoundToNoCTMCannotCommit() public {
+        CTMUpgradeExecutor unbound = new CTMUpgradeExecutor(governor, IChainTypeManager(address(0)), ctmProxyAdmin);
+        assertEq(address(unbound.CHAIN_TYPE_MANAGER()), address(0));
+        vm.prank(governor);
+        vm.expectRevert();
+        unbound.applyCTMUpgrade(ICTMTransition(address(transition)));
+        assertEq(chainContractAddress.upgradeTransition(0), address(0), "the fixture CTM commits nothing");
     }
 
     /// @dev The executor targeted decides the CTM: the second CTM's executor commits the same

@@ -36,7 +36,8 @@ Finished, and described where it now lives:
   prepares report; the Rust merger derives those calls and composes nothing else. Spec:
   `protocol-docs/ecosystem-upgrade-coordination.md`.
 - **`UpgradeStageValidator` and `GovernanceUpgradeTimer` are deleted.** The bootstrap's
-  `migrate()` and `validateApplied()` check its preconditions and completion themselves.
+  `migrate()` checks its preconditions itself; its completion is checked after the fork replay
+  (`ecosystem upgrade-governance`) and by the tests.
 - **The ServerNotifier is an ordinary CTM-domain row.** After the bootstrap's one-time handover
   (rendered from live state, `CTMUpgrade_v35.serverNotifierHandoverCalls`;
   `ServerNotifierHandover.t.sol`) no prepare emits an admin call for it.
@@ -44,8 +45,8 @@ Finished, and described where it now lives:
   migration (`upgradeFromBootstrap`); nothing is repackaged into an intermediate struct.
 - **`CTMUpgradeBase` and `DefaultL2UpgradeStrategy` are gone**; the L2 side a version authors is
   one `authorL2Side` result.
-- **Objects carry no codehash pins.** Every object and member is a plain address, `validate()`
-  enforces that every named contract is deployed code, and provenance is governance's approval of
+- **Objects carry no codehash pins.** Every object and member is a plain address, the chain
+  enforces only that every named contract is deployed code, and provenance is governance's approval of
   the exact deployed objects, verified off-chain before every vote. Described in
   [registry-driven-upgrades.md](registry-driven-upgrades.md#provenance-and-validation).
 - Batch 1 (below) is implemented; batch 2 is partially implemented.

@@ -26,6 +26,7 @@ import {CTMUpgradeComposer} from "contracts/upgrades/registry/libraries/CTMUpgra
 import {ICTMTransition} from "contracts/upgrades/registry/objects/ICTMTransition.sol";
 import {FixedDelegateCalldataComposer} from "contracts/dev-contracts/FixedDelegateCalldataComposer.sol";
 import {L2PlanFixtures} from "./L2PlanFixtures.sol";
+import {RegistryPostState} from "./RegistryPostState.sol";
 
 import {Diamond} from "contracts/state-transition/libraries/Diamond.sol";
 import {IChainTypeManager} from "contracts/state-transition/IChainTypeManager.sol";
@@ -56,7 +57,7 @@ import {
 ///         the way the v35 bootstrap leaves them, and real write-once release/transition objects.
 ///         See {protocol-docs/ecosystem-upgrade-coordination.md}.
 /// @dev Every fixture transition departs from the fixture's current release toward `release`.
-abstract contract CTMUpgradeExecutorFixture is ChainTypeManagerTest {
+abstract contract CTMUpgradeExecutorFixture is ChainTypeManagerTest, RegistryPostState {
     CTMUpgradeExecutor internal ctmExecutor;
     ProxyAdmin internal ctmProxyAdmin;
     CoreUpgradeExecutor internal coreExecutor;
@@ -392,8 +393,8 @@ contract CTMUpgradeExecutorTest is CTMUpgradeExecutorFixture {
 
     /// @dev A transition departing from the CTM's release cannot carry a stale version edge: the
     ///      edge is read off the releases, and the CTM's release and version only move together.
-    ///      The executor's version assert is therefore redundant with its release assert for any
-    ///      genuine object, and stays as the second of two independent checks.
+    ///      The CTM's version check (`_commitVersionEdge`) is therefore redundant with its release
+    ///      check for any genuine object, and stays as the second of two independent checks.
     function test_aTransitionFromTheLiveReleaseDepartsFromTheLiveVersion() public {
         _execute(transition);
 
@@ -594,23 +595,18 @@ contract CTMUpgradeExecutorTest is CTMUpgradeExecutorFixture {
         ctmExecutor.forward(calls);
     }
 
-    // ─────────────────────────── post-state verification ───────────────────────────
+    // ─────────────────────────── post-state ───────────────────────────
+    // The commit's post-conditions are not re-checked on chain: they are asserted here, by the
+    // anvil runners and by protocol-ops after a replay (`RegistryPostState`).
 
-    function test_validateTransitionApplied_revertsBeforeAndPassesAfterApply() public {
-        // Nothing is committed for the transition's departing version yet.
-        vm.expectRevert(abi.encodeWithSelector(TransitionNotCommitted.selector, address(transition), address(0)));
-        ctmExecutor.validateTransitionApplied(ICTMTransition(address(transition)));
-
+    function test_applyCTMUpgrade_leavesTheTransitionCommittedAndTheCTMOnItsTarget() public {
+        assertEq(chainContractAddress.upgradeTransition(0), address(0), "nothing is committed before");
         _execute(transition);
-
-        // A view over live state — anyone may run the post-state check.
-        vm.prank(makeAddr("stranger"));
-        ctmExecutor.validateTransitionApplied(ICTMTransition(address(transition)));
+        _assertTransitionApplied(chainContractAddress, ICTMTransition(address(transition)), address(ctmExecutor));
     }
 
-    /// @dev `>=` semantics: the check verifies the transition LANDED, not that it is still the
-    ///      newest — a later hop moving the CTM's version further must not invalidate it.
-    function test_validateTransitionApplied_survivesALaterVersionBump() public {
+    /// @dev A later hop moves the CTM on; the earlier departure keeps naming its transition.
+    function test_aLaterHopKeepsTheEarlierCommitment() public {
         _execute(transition);
         CTMTransition first = transition;
         uint256 firstVersion = newVersion;
@@ -622,10 +618,9 @@ contract CTMUpgradeExecutorTest is CTMUpgradeExecutorFixture {
         CTMTransition second = _deployTransitionFrom(880, appliedRelease);
         assertEq(second.oldProtocolVersion(), firstVersion, "the second hop departs from the first's version");
         _execute(second);
-        assertEq(chainContractAddress.protocolVersion(), newVersion, "second hop must move the CTM beyond");
 
-        ctmExecutor.validateTransitionApplied(ICTMTransition(address(first)));
-        ctmExecutor.validateTransitionApplied(ICTMTransition(address(second)));
+        assertEq(chainContractAddress.upgradeTransition(0), address(first), "the first departure keeps its edge");
+        _assertTransitionApplied(chainContractAddress, ICTMTransition(address(second)), address(ctmExecutor));
     }
 
     function test_upgradeChain_rejectsDifferentTransition() public {

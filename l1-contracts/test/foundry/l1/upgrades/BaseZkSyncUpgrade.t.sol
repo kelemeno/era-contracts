@@ -8,8 +8,6 @@ import {LEGACY_PRIORITY_TX_MAX_GAS_LIMIT} from "test/foundry/TestConstants.sol";
 import {BaseZkSyncUpgrade} from "contracts/upgrades/BaseZkSyncUpgrade.sol";
 
 import {
-    MAX_ALLOWED_MINOR_VERSION_DELTA,
-    MAX_NEW_FACTORY_DEPS,
     PRIORITY_TX_MAX_GAS_LIMIT,
     UPGRADE_TX_MAX_GAS_LIMIT,
     ZKSYNC_OS_SYSTEM_UPGRADE_L2_TX_TYPE
@@ -18,18 +16,14 @@ import {SemVer} from "contracts/common/libraries/SemVer.sol";
 import {
     InvalidTxType,
     L2UpgradeNonceNotEqualToNewProtocolVersion,
-    NewProtocolMajorVersionNotZero,
     PatchCantSetUpgradeTxn,
-    PreviousProtocolMajorVersionNotZero,
     PreviousUpgradeNotCleaned,
     PreviousUpgradeNotFinalized,
-    ProtocolVersionMinorDeltaTooBig,
     ProtocolVersionTooSmall
 } from "contracts/upgrades/ZkSyncUpgradeErrors.sol";
 import {
     PubdataGreaterThanLimit,
     TimeNotReached,
-    TooManyFactoryDeps,
     TooMuchGas,
     ValidateTxnNotEnoughGas
 } from "contracts/common/L1ContractErrors.sol";
@@ -194,46 +188,9 @@ contract BaseZkSyncUpgradeTest is BaseUpgrade {
         _upgrade();
     }
 
-    // Previous major version is not zero
-    function test_revertWhen_MajorVersionIsNotZero() public {
-        baseZkSyncUpgrade.setProtocolVersion(SemVer.packSemVer(1, 0, 0));
-
-        protocolVersion = SemVer.packSemVer(1, 1, 0);
-
-        vm.expectRevert(abi.encodeWithSelector(PreviousProtocolMajorVersionNotZero.selector));
-        _upgrade();
-    }
-
-    // New major version is not zero
-    function test_revertWhen_MajorMustAlwaysBeZero(uint32 newProtocolVersion) public {
-        vm.assume(newProtocolVersion > 0);
-
-        protocolVersion = SemVer.packSemVer(1, newProtocolVersion, 0);
-
-        vm.expectRevert(abi.encodeWithSelector(NewProtocolMajorVersionNotZero.selector));
-        _upgrade();
-    }
-
-    // Protocol version difference is too big
-    function test_revertWhen_tooBigProtocolVersionDifference(
-        uint32 newProtocolVersion,
-        uint8 oldProtocolVersion
-    ) public {
-        vm.assume(newProtocolVersion > MAX_ALLOWED_MINOR_VERSION_DELTA + oldProtocolVersion + 1);
-        baseZkSyncUpgrade.setProtocolVersion(SemVer.packSemVer(0, oldProtocolVersion, 0));
-        uint256 semVerNewProtocolVersion = SemVer.packSemVer(0, newProtocolVersion, 0);
-
-        protocolVersion = semVerNewProtocolVersion;
-
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                ProtocolVersionMinorDeltaTooBig.selector,
-                MAX_ALLOWED_MINOR_VERSION_DELTA,
-                newProtocolVersion - oldProtocolVersion
-            )
-        );
-        _upgrade();
-    }
+    // The major and minor-delta rules of an edge are not the engine's: `VersionEdgeLib` refuses an
+    // edge breaking them when its object is constructed (StorageRegistries.t.sol), and a chain only
+    // crosses an edge departing its own version (`AdminFacet.upgradeChainFromVersion`).
 
     // Previous upgrade has not been finalized
     function test_revertWhen_previousUpgradeHasNotBeenFinalized() public {
@@ -293,15 +250,8 @@ contract BaseZkSyncUpgradeTest is BaseUpgrade {
         _upgrade();
     }
 
-    // Factory deps can be at most 64 (MAX_NEW_FACTORY_DEPS)
-    function test_revertWhen_FactoryDepsCanBeAtMost64(uint8 maxNewFactoryDeps) public {
-        vm.assume(maxNewFactoryDeps > MAX_NEW_FACTORY_DEPS);
-
-        l2CanonicalTransaction.factoryDeps = new uint256[](maxNewFactoryDeps);
-
-        vm.expectRevert(abi.encodeWithSelector(TooManyFactoryDeps.selector));
-        _upgrade();
-    }
+    // The factory-dependency count is bounded where the L2 plan is built (`L2PlanLib.build`,
+    // StorageRegistries.t.sol): every upgrade transaction an engine sets is composed from one.
 
     // Upgrade with a factory dep hash
     function test_upgrade_WithFactoryDepHash() public {

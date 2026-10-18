@@ -39,8 +39,9 @@ interface ICTMRelease is IManifestHash {
 
     /// @notice Reverts unless every contract this release names (DiamondInit, genesis upgrade,
     ///         verifier, every genesis facet) is deployed code, every genesis facet describes at
-    ///         least one selector, and no selector is described by two facets. THE enforcement
-    ///         surface: the paths that install or apply a release call it.
+    ///         least one selector, and no selector is described by two facets. Run once, when
+    ///         `ChainTypeManager` installs the release; it reads no state that can change
+    ///         afterwards, so an `eth_call` of it before the vote predicts the install.
     /// @dev It does NOT attest that the code is the reviewed code — that is governance's
     ///      approval of this object's member ADDRESSES, established off-chain before approval
     ///      (see {docs/registry-driven-upgrades.md}).

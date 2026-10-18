@@ -237,7 +237,7 @@ export function releaseInitArgs(manifest: any, ctm: any): any {
  * `CTMTransition.TransitionManifest` initialize argument from one `manifest.ctms[]` entry.
  * `newRelease` is the just-deployed `CTMRelease` address — passed in by the runner rather than
  * read from the JSON, since the release must be deployed first anyway (transition
- * initialization validates it and derives the facet/hash delta from the release pair).
+ * initialization derives the facet/hash delta from the release pair).
  */
 export function transitionInitArgs(manifest: any, ctm: any, newRelease: string, delegateComposer: string): any {
   // Release provenance is not a manifest field: the CTM runs the release's own `validate()` and

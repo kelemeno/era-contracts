@@ -149,10 +149,11 @@ cargo run -p protocol_ops -- ecosystem upgrade-broadcast --manifest <out>/manife
 cargo run -p protocol_ops -- ecosystem upgrade-governance --env <env> --l1-rpc-url <rpc>
 ```
 
-replays the governance bundle of `<env-out>/ecosystem.toml` on a fork as governance and emits the
-governance Safe bundle; `ecosystem governance-toml-to-simulator` emits the transaction-simulator
-JSON. On the bootstrap edge the bundle ends with the edge's completion check
-(`RegistryBootstrapMigration.validateApplied()`), so the replay fails unless the edge completed.
+replays the governance bundle of `<env-out>/ecosystem.toml` on a fork as governance, fails unless
+the fork is left in the state the package describes
+([where each check lives](../../../protocol-docs/ecosystem-upgrade.md#where-each-check-lives)), and
+emits the governance Safe bundle; `ecosystem governance-toml-to-simulator` emits the transaction-simulator JSON. On the
+bootstrap edge the bundle ends with `RegistryBootstrapMigration.migrate()`.
 Monitoring and recovery: the [operations document](../../../docs/upgrade-operations.md).
 
 ## Emergency execution

@@ -15,10 +15,10 @@
  *   4. `protocol-ops ecosystem upgrade-prepare-all` with the scenario's core/CTM script paths
  *      (deployer Safe bundles replayed onto the harness anvil, the ChainAdmin's half of the one-time
  *      ServerNotifier handover included); the merged governance bundle is asserted to be exactly
- *      the one `RegistryBootstrapSequence.actions()` derives, closing with the edge's completion
- *      check; `protocol-ops ecosystem verify-bootstrap` must pass on the package (see
+ *      the one `RegistryBootstrapSequence.actions()` derives, closing with `migrate()`;
+ *      `protocol-ops ecosystem verify-bootstrap` must pass on the package (see
  *      `verifyPackageAsReviewed`). Then `protocol-ops ecosystem upgrade-governance` replays that
- *      one bundle.
+ *      one bundle, and the edge's post-state is read back live (`assertBootstrapCompleted`).
  *   5. Per-chain legacy handed-cut crossing, recorded-L2-tx verification, and the L2 relay of
  *      the proposed upgrade transaction on each chain's anvil fork.
  *   6. Final protocol-version verification on every upgraded chain.
@@ -72,6 +72,7 @@ import { getAbi, getBytecode, getCreationBytecode } from "../core/contracts";
 import type { ContractName } from "../core/contracts";
 import { forceBatchExecutedEqualsCommitted, transferOwnable2Step } from "./harness-shims";
 import {
+  assertCtmTransitionApplied,
   assertLegsApplied,
   clearGenesisUpgradeTxHash,
   discoverDomainExecutors,
@@ -87,7 +88,6 @@ import {
 import {
   assertBootstrapBundle,
   assertBootstrapCompleted,
-  assertBootstrapExecutorsGoverned,
   assertServerNotifierState,
   installLegacyFacet,
   crossBootstrapEdgeOnChains,
@@ -95,7 +95,6 @@ import {
 import type { GovernanceCall, MergedGovernanceOutput } from "./governance-bundle";
 import { assertBundleIs, assertRegistryHopBundle, upgradeLegsOf } from "./governance-bundle";
 import { recordL1TransactionGas } from "./l1-transaction-gas";
-import { proxyUpgradeSlotIndex } from "./registry-manifest";
 import { createProvider, impersonateAndRun } from "../core/utils";
 import { runtimeConfig } from "../core/runtime-config";
 import type { ChainRole } from "../core/types";
@@ -318,22 +317,6 @@ export async function runPipelineUpgradeScenario(scenario: PipelineUpgradeScenar
       executeBundles: true,
     });
 
-    const migration = new ethers.Contract(migrationAddr, getAbi("RegistryBootstrapMigration"), l1Provider);
-    const notifierRow = (await migration.getManifest()).ctmProxyUpgrades[
-      proxyUpgradeSlotIndex("CTMContract", "ServerNotifier")
-    ];
-    await assertServerNotifierState(
-      l1Provider,
-      ctmAddresses.chainTypeManager,
-      {
-        admin: ctmProxyAdmin,
-        owner: ctmExecutor,
-        pendingOwner: ethers.constants.AddressZero,
-        implementation: notifierRow.implNew,
-        chainTypeManager: ctmAddresses.chainTypeManager,
-      },
-      "held by the CTM executor and re-pointed by migrate() after the governance replay"
-    );
     const validatorTimelock: string = await new ethers.Contract(
       ctmAddresses.chainTypeManager,
       getAbi("IChainTypeManager"),
@@ -350,13 +333,12 @@ export async function runPipelineUpgradeScenario(scenario: PipelineUpgradeScenar
       );
     }
     console.log("  ✓ the ValidatorTimelock is governance-owned after the replay");
-    await assertBootstrapCompleted(l1Provider, migrationAddr);
-    await assertBootstrapExecutorsGoverned(
-      l1Provider,
-      migrationAddr,
-      await readProxyAdmin(l1Provider, l1Addresses.messageRoot),
-      l1Addresses.governance
-    );
+    await assertBootstrapCompleted(l1Provider, {
+      migration: migrationAddr,
+      coreTransition: bootstrapCoreTransition,
+      ecosystemProxyAdmin: await readProxyAdmin(l1Provider, l1Addresses.messageRoot),
+      governance: l1Addresses.governance,
+    });
 
     // ── Prepare diamond state for chain upgrades ──
     if (scenario.clearGenesisUpgradeTxHash) {
@@ -477,7 +459,8 @@ function readReportedEip7702Checker(mergedEcosystemTomlPath: string): string | u
  *   4. End state: one transaction emitted each leg's domain event once, in leg order; each row
  *      object's proxies run their `implNew`, with `ProxyImplementationUpgraded` exactly for the
  *      rows that moved; chains and CTM at the new version, the transition committed for the
- *      departing version, and the CTM on the transition's release.
+ *      departing version, the CTM on the transition's release, and the CTM domain still held by
+ *      the CTM executor (`assertCtmTransitionApplied`).
  */
 async function runRecurringHop(
   scenario: PipelineUpgradeScenario,
@@ -693,18 +676,19 @@ async function runRecurringHop(
     if (!version.eq(ethers.BigNumber.from(hop.expectedProtocolVersion))) {
       throw new Error(`CTM protocol version ${version.toHexString()}, expected ${hop.expectedProtocolVersion}`);
     }
-    const committed: string = await ctm.upgradeTransition(oldVersion);
-    if (committed.toLowerCase() !== transitionAddr.toLowerCase()) {
-      throw new Error(`CTM committed transition ${committed} for the departing version, expected ${transitionAddr}`);
-    }
-    const executor = new ethers.Contract(executorAddr, getAbi("CTMUpgradeExecutor"), l1Provider);
-    await executor.validateTransitionApplied(transitionAddr);
+    await assertCtmTransitionApplied(
+      l1Provider,
+      ctx.ctmAddresses.chainTypeManager,
+      transitionAddr,
+      oldVersion,
+      executors.ctmExecutor
+    );
+    console.log(
+      `  ✓ CTM commits ${transitionAddr} for ${oldVersion.toHexString()} and runs its release; ` +
+        `domain held by ${executors.ctmExecutor}`
+    );
     const transition = new ethers.Contract(transitionAddr, getAbi("ICTMTransition"), l1Provider);
     const newRelease: string = await transition.newRelease();
-    const currentRelease: string = await ctm.currentRelease();
-    if (currentRelease.toLowerCase() !== newRelease.toLowerCase()) {
-      throw new Error(`CTM currentRelease ${currentRelease} is not the transition's target release ${newRelease}`);
-    }
     // Read off the OBJECT rather than the prepare's logs: this is what governance and the chains
     // read, and it is the only evidence that unchanged contracts were not silently redeployed.
     if (hop.expectsReusedReleaseMembers) {

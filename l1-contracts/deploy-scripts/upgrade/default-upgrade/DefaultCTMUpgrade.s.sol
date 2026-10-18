@@ -41,7 +41,6 @@ import {UpgradeHelperLib} from "./UpgradeHelperLib.sol";
 import {CTMUpgradeParams, UpgradeKind} from "./UpgradeParams.sol";
 import {IOwnable} from "contracts/common/interfaces/IOwnable.sol";
 import {ICTMTransition} from "contracts/upgrades/registry/objects/ICTMTransition.sol";
-import {IProxyUpgradeTransition} from "contracts/upgrades/registry/objects/IProxyUpgradeTransition.sol";
 import {RegistryBootstrapMigration} from "contracts/upgrades/registry/bootstrap/RegistryBootstrapMigration.sol";
 import {CTMUpgradeExecutor} from "contracts/upgrades/registry/executors/CTMUpgradeExecutor.sol";
 import {CTMUpgradeComposer} from "contracts/upgrades/registry/libraries/CTMUpgradeComposer.sol";
@@ -408,8 +407,8 @@ contract DefaultCTMUpgrade is Script, DeployCTMScript {
             abi.encode(_manifest),
             "CTMTransition"
         );
-        // Fail here, not at execution: every contract the object names must already be deployed,
-        // and the object's own revert names the one that is not.
+        // Fail here, not at execution: the code the object names must already be deployed, and
+        // the object's own revert names the contract that is not.
         ICTMTransition(transition).validate();
     }
 
@@ -432,7 +431,6 @@ contract DefaultCTMUpgrade is Script, DeployCTMScript {
             abi.encode(ProxyUpgradeTransitionManifest({domain: ProxyUpgradeDomain.CTM, proxyUpgrades: inventory})),
             "ProxyUpgradeTransition"
         );
-        IProxyUpgradeTransition(upgradeAddresses.ctmInfrastructureTransition).validate();
     }
 
     /// @notice The enum-indexed CTM-domain inventory of this edge: a source-checked row for every

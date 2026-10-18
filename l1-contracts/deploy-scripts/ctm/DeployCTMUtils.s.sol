@@ -250,6 +250,8 @@ abstract contract DeployCTMUtils is DeployUtils, BytecodeInfoCache {
         // Deploy + initialize ran in one transaction inside the factory, so the release is already
         // initialized here with no front-runnable window; this is now a pure sanity assertion.
         require(CTMRelease(release).manifestHash() == keccak256(abi.encode(manifest)), "release manifest mismatch");
+        // Fail here rather than when the CTM installs it: the check is the one the install runs.
+        CTMRelease(release).validate();
 
         console.log("Bootstrap CTMRelease deployed at:", release);
         return release;

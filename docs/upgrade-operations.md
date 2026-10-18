@@ -31,11 +31,11 @@ Steps 1–2 are RENDERED from live state by the bootstrap prepare
 prepare output's `[ctm_admin_calls].server_notifier_handover`, declared as `admin`-phase external
 actions, and run by protocol-ops right after the prepares (`UpgradeFull::run_ctm_admin_steps`). Step
 3 is derived only while the notifier is not yet the executor's, so the bootstrap bundle reverts
-until steps 1–2 landed. `RegistryBootstrapMigration.validate()` refuses to run unless the
-manifest's mandatory notifier row names the CTM's notifier, the notifier serves the CTM, sits under
-`ctmProxyAdmin` and is owned by the CTM executor with no nomination outstanding;
-`validateApplied()` keeps checking all of it. `protocol-ops ecosystem verify-bootstrap` reports the
-handover as its own prerequisite.
+until steps 1–2 landed, and step 3 itself reverts unless the CTM executor is the nominee.
+`migrate()` refuses unless the CTM names the manifest's notifier and the notifier serves the CTM,
+and the notifier's row applies only through `ctmProxyAdmin`. `protocol-ops ecosystem
+verify-bootstrap` reports the handover as its own prerequisite, and `ecosystem upgrade-governance`
+checks after its replay that the CTM executor owns the notifier with no nomination outstanding.
 
 The handover is not undone if the bootstrap is cancelled afterwards: the notifier then simply
 belongs to the CTM domain early. A recurring prepare has no admin calls.

@@ -6,6 +6,8 @@ import {ITransparentUpgradeableProxy} from "@openzeppelin/contracts-v4/proxy/tra
 import {ChainTypeManagerTest} from "./_ChainTypeManager_Shared.t.sol";
 import {ChainTypeManager} from "contracts/state-transition/ChainTypeManager.sol";
 import {ICTMTransition} from "contracts/upgrades/registry/objects/ICTMTransition.sol";
+import {ICommittedUpgrade} from "contracts/upgrades/registry/objects/ICommittedUpgrade.sol";
+import {L2UpgradePlan} from "contracts/upgrades/registry/RegistryTypes.sol";
 import {Utils} from "foundry-test/l1/unit/concrete/Utils/Utils.sol";
 
 /// @notice Stands in for the pre-v35 CTM implementation a live proxy runs before the bootstrap
@@ -160,6 +162,9 @@ contract ChainTypeManagerLegacyStorageTest is ChainTypeManagerTest {
             abi.encodeCall(ICTMTransition.upgradeEngine, ()),
             abi.encode(makeAddr("upgradeEngine"))
         );
+        vm.mockCall(address(transition), abi.encodeCall(ICTMTransition.validate, ()), "");
+        L2UpgradePlan memory emptyPlan;
+        vm.mockCall(address(transition), abi.encodeCall(ICommittedUpgrade.l2Plan, ()), abi.encode(emptyPlan));
 
         vm.prank(governor);
         chainContractAddress.setNewVersionUpgradeFromTransition(transition);

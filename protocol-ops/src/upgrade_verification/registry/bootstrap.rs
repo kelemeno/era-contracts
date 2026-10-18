@@ -10,9 +10,9 @@
 //! * governance executes a LIST of handovers around the edge rather than only executor legs, so
 //!   the list has to be compared against the one `RegistryBootstrapSequence` derives — see
 //!   [`verify_derived_sequence`], which says why that comparison is transitional scaffolding and
-//!   must not be generalised. The list is ONE bundle ending in the edge's completion check
-//!   (`RegistryBootstrapMigration.validateApplied()`), so an edge that does not complete reverts
-//!   the whole bundle;
+//!   must not be generalised. The list is ONE bundle ending in `migrate()`, so a failing step
+//!   reverts the whole edge; what the edge must leave behind is asserted after a fork replay
+//!   ([`super::applied`]), not by the bundle;
 //! * the objects it names (`RegistryBootstrapMigration`, the bootstrap sequence) exist only for
 //!   this edge, and so do the views and checks below.
 //!
@@ -45,12 +45,16 @@ use super::lifecycle::{
     LifecycleBindings, LifecycleReview,
 };
 use super::members::{verify_engine_and_l2_plan, DepartingVerifiers, BOOTSTRAP_ENGINES};
-use super::package::BootstrapPackage;
+use super::package::{BootstrapPackage, MIGRATE_SELECTOR};
 use super::provenance::{expect_code_identity, tolerate};
 use super::rows::{participating, verify_inventory, Inventory, InventoryReview};
-use super::upgrade::{cross_check, verify_proxy_upgrade_transition, verify_release};
+use super::upgrade::{
+    cross_check, verify_bytecodes_published, verify_proxy_upgrade_transition, verify_release,
+    Publication,
+};
 use super::views::{
     self, BootstrapCall, BridgehubView, CTMUpgradeExecutorView, CtmView,
+    Ownable2StepView::transferOwnershipCall as TransferOwnershipCall,
     RegistryBootstrapMigrationView, ServerNotifierView, ZkChainGettersView,
 };
 use super::{format_semver, render_derived_payloads};
@@ -259,7 +263,7 @@ pub(crate) async fn verify<P: Provider>(
     if executed == Some(true) {
         result.report_error(
             "the migration reports executed() == true: this edge has already run and cannot run \
-             again (a replay is refused on-chain)",
+             again (a replay reverts on the CTM's `onlyOwner`: the migration no longer owns it)",
         );
     } else {
         result.report_ok("the migration is un-executed");
@@ -319,9 +323,23 @@ pub(crate) async fn verify<P: Provider>(
     result.print_info("\n== Prerequisite: ServerNotifier handover ==");
     let handover = verify_notifier_handover(provider, result, &manifest, &package.calls).await?;
 
-    // ── 5. The departing state the manifest asserts ──
-    result.print_info("\n== Departing state ==");
+    // ── 5. Readiness: the migration's `validate()` refuses an unpublished L2 dependency ──
+    result.print_info("\n== Readiness ==");
     let ctm = CtmView::new(manifest.ctm, provider);
+    verify_bytecodes_published(
+        provider,
+        result,
+        &ctm,
+        Publication {
+            object: package.migration,
+            label: "the bootstrap migration",
+            required_by: "`RegistryBootstrapMigration.validate()` (run by `migrate()`)",
+        },
+    )
+    .await?;
+
+    // ── 6. The departing state the manifest asserts ──
+    result.print_info("\n== Departing state ==");
     let Some(live_version) = tolerate(
         ctm.protocolVersion().call().await,
         result,
@@ -395,15 +413,16 @@ pub(crate) async fn verify<P: Provider>(
             anchor: Some(manifest.ctm),
             departure_unreadable: (!handover.under_ctm_proxy_admin)
                 .then_some(CTM_CONTRACT_SERVER_NOTIFIER_SLOT),
+            reported: package.reported_singletons,
         },
     )
     .await?;
 
-    // ── 6. Chains the edge leaves behind ──
+    // ── 7. Chains the edge leaves behind ──
     result.print_info("\n== Chains below the departing version ==");
     judge_lagging_chains(result, manifest.expectedProtocolVersion, &chains);
 
-    // ── 7. The ecosystem leg ──
+    // ── 8. The ecosystem leg ──
     result.print_info("\n== Ecosystem leg ==");
     // An unreadable core transition was reported when it was read, and leaves no rows to judge.
     if let Some(core_rows) = core_rows.as_ref().filter(|rows| participating(rows) > 0) {
@@ -429,6 +448,7 @@ pub(crate) async fn verify<P: Provider>(
                 domain_admin: eco_admin_addr,
                 anchor: bridgehub,
                 departure_unreadable: None,
+                reported: Default::default(),
             },
         )
         .await?;
@@ -436,7 +456,7 @@ pub(crate) async fn verify<P: Provider>(
         result.report_ok("no core transition: this edge upgrades no shared singletons");
     }
 
-    // ── 8. The calldata governance will actually sign ──
+    // ── 9. The calldata governance will actually sign ──
     result.print_info("\n== Governance calldata ==");
     let authorities = edge_authorities(
         &manifest,
@@ -445,7 +465,12 @@ pub(crate) async fn verify<P: Provider>(
         package.core_transition,
         &reviewed,
     );
-    verify_derived_sequence(provider, result, package, sequence, &authorities).await;
+    let edge = EdgeCalls {
+        migration: package.migration,
+        ecosystem_proxy_admin: bindings.core_proxy_admin,
+        core_executor: manifest.coreExecutor,
+    };
+    verify_derived_sequence(provider, result, package, sequence, &authorities, &edge).await;
 
     // A bootstrap edge legitimately declares external actions — the derived sequence itself
     // rides as declared actions, and so do the merge's extras. They are the reviewable list,
@@ -685,9 +710,10 @@ struct NotifierFacts {
     pending_owner: Option<Address>,
 }
 
-/// The one-time ServerNotifier handover `RegistryBootstrapMigration.validate()` requires complete
-/// before `migrate()` can run (see "ServerNotifier: a one-time handover, then an ordinary
-/// CTM-domain proxy" in `docs/upgrade-operations.md`), read live.
+/// The one-time ServerNotifier handover to the CTM domain (see "ServerNotifier: a one-time
+/// handover, then an ordinary CTM-domain proxy" in `docs/upgrade-operations.md`), read live. On
+/// chain `migrate()` checks only that the notifier and the CTM are bound to each other; its owner,
+/// nomination and proxy admin are checked here.
 async fn verify_notifier_handover<P: Provider>(
     provider: &P,
     result: &mut VerificationResult,
@@ -746,8 +772,10 @@ async fn verify_notifier_handover<P: Provider>(
 }
 
 /// The handover verdict over the live facts: anything short of a completed handover — or a
-/// nomination the bundle's derived first call accepts — is an ERROR, because `migrate()` refuses
-/// it.
+/// nomination the bundle's derived first call accepts — is an ERROR. A notifier not bound to the
+/// CTM fails `migrate()`, one not under the CTM-domain ProxyAdmin fails its row, an acceptance the
+/// executor cannot make fails the bundle, and a nomination left outstanding is refused by nothing
+/// on chain.
 fn judge_notifier_handover(
     result: &mut VerificationResult,
     facts: &NotifierFacts,
@@ -756,8 +784,8 @@ fn judge_notifier_handover(
 ) -> NotifierHandover {
     const MISSING: &str = "the ChainAdmin half of the ServerNotifier handover is missing: the \
                            prepare's `[ctm_admin_calls] server_notifier_handover` calls must be \
-                           executed by their live owners before the bundle, or its `migrate()` \
-                           refuses";
+                           executed by their live owners before the bundle, or the bundle \
+                           reverts";
     let notifier = facts.notifier;
     let executor = manifest.ctmExecutor;
 
@@ -812,7 +840,8 @@ fn judge_notifier_handover(
                 )),
                 Some(pending) => result.report_error(&format!(
                     "the ServerNotifier is owned by the CTM executor but has a pending owner \
-                     {pending}: `migrate()` refuses an outstanding nomination"
+                     {pending}: nothing on chain refuses it, and the nominee could take the \
+                     notifier out of the CTM domain after the edge"
                 )),
                 None => {}
             }
@@ -839,7 +868,7 @@ fn judge_notifier_handover(
                 result.report_error(
                     "the bundle does not carry governance's acceptance of the ServerNotifier \
                      nomination (`forward([acceptOwnership()])` on the CTM executor): the \
-                     nomination would stay unaccepted, and its `migrate()` refuses",
+                     notifier would stay outside the CTM domain after the edge",
                 );
             }
         }
@@ -1007,6 +1036,7 @@ async fn verify_derived_sequence<P: Provider>(
     package: &BootstrapPackage,
     sequence: Option<Address>,
     authorities: &BTreeMap<Address, String>,
+    edge: &EdgeCalls,
 ) {
     let Some(sequence_addr) = sequence else {
         result.report_error(
@@ -1035,50 +1065,79 @@ async fn verify_derived_sequence<P: Provider>(
         &derived,
         &package.external_actions,
         authorities,
-        package.migration,
+        edge,
         result,
     );
+}
+
+/// The edge's calls whose order the bundle rule pins: the migration's `migrate()`, and the
+/// ecosystem `ProxyAdmin`'s hand-over to the core executor, which must precede it.
+struct EdgeCalls {
+    migration: Address,
+    /// The core executor's `PROXY_ADMIN()`; `None` when it could not be read (already reported).
+    ecosystem_proxy_admin: Option<Address>,
+    core_executor: Address,
 }
 
 /// The bundle against the list the (construction-verified) sequence derives.
 ///
 /// The derived calls must appear as one contiguous run, in order and one-for-one, that ENDS the
-/// bundle: the edge's own steps depend on each other (the handovers before `migrate()`), and its
-/// last call is the completion check `validateApplied()` on the migration, so nothing may follow
-/// it. Ahead of that run the merge may prepend its extras — the governance-set wiring, the CTM
-/// `acceptOwnership()` normalization — and every such call is held to the rule the recurring path
-/// enforces: it must be a declared governance external action, or it is an ERROR. One rule is
-/// stricter here. The derived run is the COMPLETE list of what the edge needs from its
-/// authorities (the CTM, both ProxyAdmins, the executors, the objects), so a call to any of them
-/// outside the run is an ERROR whether declared or not: a `transferOwnership` nomination, a second
-/// `applyL1Upgrade`, a `forward` added beside the legitimate calls is exactly how a bundle would
-/// carry authority governance never reviewed, and `validateApplied()` on chain refuses a pending
-/// nomination for the same reason.
+/// bundle with `migrate()` on the migration: the edge's own steps depend on each other, so nothing
+/// may follow it. The ecosystem `ProxyAdmin` hand-over to the core executor must come before it:
+/// `migrate()` no longer checks it. Ahead of that run the merge may prepend its extras — the
+/// governance-set wiring, the CTM `acceptOwnership()` normalization — and every such call is held
+/// to the rule the recurring path enforces: it must be a declared governance external action, or
+/// it is an ERROR. One rule is stricter here. The derived run is the COMPLETE list of what the
+/// edge needs from its authorities (the CTM, both ProxyAdmins, the executors, the objects), so a
+/// call to any of them outside the run is an ERROR whether declared or not: a `transferOwnership`
+/// nomination, a second `applyL1Upgrade`, a `forward` added beside the legitimate calls is exactly
+/// how a bundle would carry authority governance never reviewed.
 fn verify_bundle(
     submitted: &[GovernanceCall],
     derived: &[views::BootstrapAction],
     declared: &[ExternalAction],
     authorities: &BTreeMap<Address, String>,
-    migration: Address,
+    edge: &EdgeCalls,
     result: &mut VerificationResult,
 ) {
-    let completion = RegistryBootstrapMigrationView::validateAppliedCall {}.abi_encode();
+    let migration = edge.migration;
+    let is_migrate = |action: &views::BootstrapAction| {
+        action.call.target == migration && action.call.data[..] == MIGRATE_SELECTOR[..]
+    };
     match derived.last() {
-        Some(last) if last.call.target == migration && last.call.data[..] == completion[..] => {
-            result.report_ok(&format!(
-                "the derived sequence ends with `validateApplied()` on the migration {migration}: \
-                 a failing completion check reverts the whole bootstrap bundle"
-            ))
-        }
+        Some(last) if is_migrate(last) => result.report_ok(&format!(
+            "the derived sequence ends with `migrate()` on the migration {migration}: nothing \
+             runs after the edge"
+        )),
         Some(_) => result.report_error(&format!(
-            "the derived sequence does not end with `validateApplied()` on the migration \
-             {migration}, which every bootstrap bundle does: the sequence is not describing this \
-             edge"
+            "the derived sequence does not end with `migrate()` on the migration {migration}, \
+             which every bootstrap bundle does: the sequence is not describing this edge"
         )),
         None => result.report_error(
             "the sequence derives no calls, which no bootstrap edge does: the sequence is not \
              describing this edge",
         ),
+    }
+    if let Some(admin) = edge.ecosystem_proxy_admin {
+        let hand_over = TransferOwnershipCall {
+            newOwner: edge.core_executor,
+        }
+        .abi_encode();
+        let handed = derived.iter().position(|action| {
+            action.call.target == admin && action.call.data[..] == hand_over[..]
+        });
+        match (handed, derived.iter().position(is_migrate)) {
+            (Some(handed), Some(migrate)) if handed < migrate => result.report_ok(&format!(
+                "the derived sequence hands the ecosystem ProxyAdmin {admin} to the core executor \
+                 before `migrate()`"
+            )),
+            _ => result.report_error(&format!(
+                "the derived sequence does not hand the ecosystem ProxyAdmin {admin} to the core \
+                 executor {} before `migrate()`: nothing on chain checks that hand-over any more, \
+                 so the ecosystem domain would be left with governance",
+                edge.core_executor
+            )),
+        }
     }
 
     let run = if derived.is_empty() {
@@ -1110,7 +1169,7 @@ fn verify_bundle(
             if trailing > 0 {
                 result.report_error(&format!(
                     "{trailing} call(s) follow the derived run: the run must end the bundle, \
-                     whose last call is the completion check"
+                     whose last call is `migrate()`"
                 ));
             }
         }
@@ -1254,10 +1313,6 @@ mod tests {
         }
     }
 
-    fn completion_check() -> Vec<u8> {
-        views::RegistryBootstrapMigrationView::validateAppliedCall {}.abi_encode()
-    }
-
     fn derived_bundle() -> Vec<views::BootstrapAction> {
         vec![
             action(
@@ -1285,7 +1340,6 @@ mod tests {
                 MIGRATION,
                 super::super::package::MIGRATE_SELECTOR.to_vec(),
             ),
-            action("check the edge completed", MIGRATION, completion_check()),
         ]
     }
 
@@ -1323,6 +1377,14 @@ mod tests {
         .collect()
     }
 
+    fn edge() -> EdgeCalls {
+        EdgeCalls {
+            migration: MIGRATION,
+            ecosystem_proxy_admin: Some(ECO_ADMIN),
+            core_executor: CORE_EXECUTOR,
+        }
+    }
+
     fn run_with(
         submitted: &[GovernanceCall],
         derived: &[views::BootstrapAction],
@@ -1334,7 +1396,7 @@ mod tests {
             derived,
             declared,
             &authorities(),
-            MIGRATION,
+            &edge(),
             &mut result,
         );
         result
@@ -1355,7 +1417,7 @@ mod tests {
     /// THE finding: `coreExecutor.transferOwnership(attacker)` appended after the legitimate
     /// run. The address is known (it takes two derived calls earlier in the run), the selector
     /// is one the run itself uses, and the nominee would accept after the bundle and own the
-    /// ecosystem domain. It also sits after the completion check, which must end the bundle.
+    /// ecosystem domain. It also sits after `migrate()`, which must end the bundle.
     #[test]
     fn a_nomination_appended_after_the_run_fails() {
         let derived = derived_bundle();
@@ -1434,10 +1496,9 @@ mod tests {
         assert_eq!(result.errors, 1);
     }
 
-    /// Nothing may follow the completion check, not even a declared call outside the
-    /// authorities: the check is the bundle's last word on whether the edge completed.
+    /// Nothing may follow `migrate()`, not even a declared call outside the authorities.
     #[test]
-    fn a_declared_call_after_the_completion_check_fails() {
+    fn a_declared_call_after_migrate_fails() {
         let derived = derived_bundle();
         let wiring = call(PUH, vec![0x99, 0x88, 0x77, 0x66]);
         let mut submitted = submitted_from(&derived);
@@ -1446,6 +1507,7 @@ mod tests {
         declared.push(ExternalAction::governance("wiring", "governance", &wiring));
         let result = run(&submitted, &declared);
         assert_eq!(result.errors, 1);
+        assert!(result.has_error("whose last call is `migrate()`"));
     }
 
     /// An `admin` declaration rides no governance bundle, so it does not account for a call in
@@ -1475,8 +1537,7 @@ mod tests {
         assert!(result.ensure_success().is_err());
     }
 
-    /// A derived call missing from the bundle is not a run at all — the completion check
-    /// included.
+    /// A derived call missing from the bundle is not a run at all — `migrate()` included.
     #[test]
     fn a_dropped_derived_call_fails() {
         let derived = derived_bundle();
@@ -1488,27 +1549,72 @@ mod tests {
         }
     }
 
-    /// A sequence whose list does not end in `validateApplied()` on the migration is not the
-    /// reviewed bootstrap sequence describing this edge, even when the bundle matches it.
+    /// A sequence whose list does not end in `migrate()` on the migration is not the reviewed
+    /// bootstrap sequence describing this edge, even when the bundle matches it — the retired
+    /// `validateApplied()` completion check after it included.
     #[test]
-    fn a_sequence_not_ending_in_the_completion_check_fails() {
-        let mut derived = derived_bundle();
-        derived.pop();
-        let result = run_with(
+    fn a_sequence_not_ending_in_migrate_fails() {
+        let retired_completion_check = action(
+            "check the edge completed",
+            MIGRATION,
+            alloy::primitives::keccak256(b"validateApplied()")[..4].to_vec(),
+        );
+        let mut trailing = derived_bundle();
+        trailing.push(retired_completion_check);
+        let mut elsewhere = derived_bundle();
+        elsewhere.last_mut().unwrap().call.target = ATTACKER;
+        for derived in [trailing, elsewhere] {
+            let result = run_with(
+                &submitted_from(&derived),
+                &derived,
+                &declared_from(&derived),
+            );
+            assert!(
+                result.has_error("does not end with `migrate()`"),
+                "{:?}",
+                result.error_messages
+            );
+        }
+    }
+
+    /// `migrate()` no longer checks that the ecosystem ProxyAdmin reached the core executor, so the
+    /// derived run must hand it over before `migrate()` — not after it, and not to anyone else.
+    #[test]
+    fn the_ecosystem_hand_over_must_precede_migrate() {
+        let mut late = derived_bundle();
+        let hand_over = late.remove(0);
+        late.push(hand_over);
+        let mut elsewhere = derived_bundle();
+        elsewhere[0].call.data = Bytes::from(transfer_ownership(ATTACKER));
+        let mut missing = derived_bundle();
+        missing.remove(0);
+        for derived in [late, elsewhere, missing] {
+            let result = run_with(
+                &submitted_from(&derived),
+                &derived,
+                &declared_from(&derived),
+            );
+            assert!(
+                result.has_error("before `migrate()`: nothing on chain checks"),
+                "{:?}",
+                result.error_messages
+            );
+        }
+        // With the core executor's ProxyAdmin unread (already reported), no order is claimed.
+        let mut result = VerificationResult::default();
+        let derived = derived_bundle();
+        verify_bundle(
             &submitted_from(&derived),
             &derived,
             &declared_from(&derived),
+            &authorities(),
+            &EdgeCalls {
+                ecosystem_proxy_admin: None,
+                ..edge()
+            },
+            &mut result,
         );
-        assert_eq!(result.errors, 1);
-
-        let mut elsewhere = derived_bundle();
-        elsewhere.last_mut().unwrap().call.target = ATTACKER;
-        let result = run_with(
-            &submitted_from(&elsewhere),
-            &elsewhere,
-            &declared_from(&elsewhere),
-        );
-        assert_eq!(result.errors, 1);
+        assert_eq!(result.errors, 0);
     }
 
     // ───────────────────────── the sequence as an oracle ─────────────────────────
@@ -1541,6 +1647,7 @@ mod tests {
             reported_ctm_executor: None,
             reported_ctm: None,
             reported_ctm_proxy_admin: None,
+            reported_singletons: Default::default(),
             ctm_key: "zksync_os".to_string(),
             calls: Vec::new(),
             external_actions: Vec::new(),
@@ -1605,7 +1712,15 @@ mod tests {
         let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
         let mut authorities = authorities();
         authorities.insert(genuine, "the bootstrap sequence".to_string());
-        verify_derived_sequence(&provider, &mut result, &package, sequence, &authorities).await;
+        verify_derived_sequence(
+            &provider,
+            &mut result,
+            &package,
+            sequence,
+            &authorities,
+            &edge(),
+        )
+        .await;
         assert!(asserter.read_q().is_empty(), "the list was read");
         assert_eq!(
             result.errors, 0,
@@ -1641,7 +1756,15 @@ mod tests {
         assert!(reviewed.is_empty());
 
         let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
-        verify_derived_sequence(&provider, &mut result, &package, sequence, &BTreeMap::new()).await;
+        verify_derived_sequence(
+            &provider,
+            &mut result,
+            &package,
+            sequence,
+            &BTreeMap::new(),
+            &edge(),
+        )
+        .await;
         assert_eq!(asserter.read_q().len(), 1, "no list may be read");
         assert_eq!(result.errors, 2);
     }
@@ -1661,7 +1784,7 @@ mod tests {
     //
     // The facts as the chain reports them at review time, judged against a manifest whose
     // mandatory notifier row names NOTIFIER. Every state short of "complete", or "nominated and
-    // accepted by the bundle's derived first call", must be an error: `migrate()` refuses it.
+    // accepted by the bundle's derived first call", must be an error.
 
     const NOTIFIER: Address = Address::repeat_byte(0x2A);
     const CTM_EXECUTOR: Address = Address::repeat_byte(0x2B);

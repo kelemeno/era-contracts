@@ -11,12 +11,9 @@ import {
     EMPTY_STRING_KECCAK,
     GENESIS_BATCH_COMMITMENT
 } from "contracts/common/Config.sol";
-import {
-    ReleaseProtocolVersionMismatch,
-    TransitionReleaseMismatch,
-    ZeroAddress
-} from "contracts/common/L1ContractErrors.sol";
-import {SemVer} from "contracts/common/libraries/SemVer.sol";
+import {TransitionReleaseMismatch} from "contracts/common/L1ContractErrors.sol";
+import {ICommittedUpgrade} from "contracts/upgrades/registry/objects/ICommittedUpgrade.sol";
+import {L2UpgradePlan} from "contracts/upgrades/registry/RegistryTypes.sol";
 import {Utils} from "foundry-test/l1/unit/concrete/Utils/Utils.sol";
 
 /// @notice The CTM's `currentRelease` — the release new chains are created from — moves only
@@ -59,6 +56,11 @@ contract CurrentReleaseTest is ChainTypeManagerTest {
             abi.encodeCall(ICTMTransition.upgradeEngine, ()),
             abi.encode(makeAddr("upgradeEngine"))
         );
+        // The commit's own checks: the code the transition names, and an L2 plan with nothing to
+        // publish.
+        vm.mockCall(address(transition), abi.encodeCall(ICTMTransition.validate, ()), "");
+        L2UpgradePlan memory emptyPlan;
+        vm.mockCall(address(transition), abi.encodeCall(ICommittedUpgrade.l2Plan, ()), abi.encode(emptyPlan));
     }
 
     function test_initializationStartsAtTheReleasesVersion() public view {
@@ -88,6 +90,11 @@ contract CurrentReleaseTest is ChainTypeManagerTest {
 
         assertEq(chainContractAddress.protocolVersion(), NEW_VERSION, "the version is the release's own");
         assertEq(chainContractAddress.currentRelease(), newRelease, "the release moved with it");
+        assertEq(
+            ICTMRelease(newRelease).protocolVersion(),
+            chainContractAddress.protocolVersion(),
+            "the installed release is the release of the CTM's version"
+        );
         assertEq(chainContractAddress.l1GenesisUpgrade(), newGenesisUpgrade, "genesis reads the new release");
         IExecutor.StoredBatchInfo memory batchZero = IExecutor.StoredBatchInfo({
             batchNumber: 0,
@@ -103,8 +110,9 @@ contract CurrentReleaseTest is ChainTypeManagerTest {
         assertEq(chainContractAddress.storedBatchZero(), keccak256(abi.encode(batchZero)), "batch zero too");
     }
 
+    /// @dev The release's version is the edge's target, and reading it off a zero address fails.
     function test_revertWhen_theCutTakingEdgeNamesNoRelease() public {
-        vm.expectRevert(ZeroAddress.selector);
+        vm.expectRevert(bytes(""));
         vm.prank(governor);
         chainContractAddress.setNewVersionUpgrade(getDiamondCutData(diamondInit), 0, type(uint256).max, address(0));
     }
@@ -127,6 +135,11 @@ contract CurrentReleaseTest is ChainTypeManagerTest {
 
         assertEq(chainContractAddress.protocolVersion(), NEW_VERSION, "the version moved");
         assertEq(chainContractAddress.currentRelease(), newRelease, "and the release with it, in the same call");
+        assertEq(
+            ICTMRelease(chainContractAddress.currentRelease()).protocolVersion(),
+            chainContractAddress.protocolVersion(),
+            "the installed release is the release of the CTM's version"
+        );
         assertEq(chainContractAddress.upgradeTransition(0), address(transition), "the edge is committed");
     }
 
@@ -138,26 +151,6 @@ contract CurrentReleaseTest is ChainTypeManagerTest {
 
         vm.expectRevert(
             abi.encodeWithSelector(TransitionReleaseMismatch.selector, otherRelease, Utils.TEST_GENESIS_REGISTRY)
-        );
-        vm.prank(governor);
-        chainContractAddress.setNewVersionUpgradeFromTransition(transition);
-    }
-
-    /// @dev A genuine `CTMTransition` cannot disagree with its own target release — it READS its
-    ///      version from it — so this is the counterfeit case: an object claiming one version and
-    ///      naming a release of another. The pointer and the version never come apart.
-    function test_revertWhen_theTransitionsReleaseIsOfAnotherVersion() public {
-        uint256 claimedVersion = NEW_VERSION;
-        uint256 releaseVersion = SemVer.packSemVer(0, 2, 0);
-        ICTMTransition transition = _mockTransition(
-            Utils.TEST_GENESIS_REGISTRY,
-            0,
-            claimedVersion,
-            _releaseAt(releaseVersion)
-        );
-
-        vm.expectRevert(
-            abi.encodeWithSelector(ReleaseProtocolVersionMismatch.selector, claimedVersion, releaseVersion)
         );
         vm.prank(governor);
         chainContractAddress.setNewVersionUpgradeFromTransition(transition);

@@ -18,11 +18,13 @@ import {RegistryAuthorityLib} from "contracts/upgrades/registry/libraries/Regist
 import {CTMUpgradeExecutor} from "contracts/upgrades/registry/executors/CTMUpgradeExecutor.sol";
 import {CoreUpgradeExecutor} from "contracts/upgrades/registry/executors/CoreUpgradeExecutor.sol";
 import {Utils} from "deploy-scripts/utils/Utils.sol";
+import {RegistryPostState} from "../../unit/concrete/Upgrades/registry/RegistryPostState.sol";
+import {IChainTypeManager} from "contracts/state-transition/IChainTypeManager.sol";
 
 /// @notice Checks that the hand-off `protocol-ops hub init` / `ctm init` performs after the deploy scripts leaves
 /// every contract with its intended owner and nothing with the deployer — and that a fresh ecosystem is born in
 /// the registry model: the end state passes the same completion check a v35 bootstrap must pass.
-contract DeployOwnershipHandOffTest is ZKChainDeployer {
+contract DeployOwnershipHandOffTest is ZKChainDeployer, RegistryPostState {
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     /// @dev `Governance` treats timestamp 1 (the test default) as "executed", so zero-delay operations need a later one.
@@ -84,11 +86,20 @@ contract DeployOwnershipHandOffTest is ZKChainDeployer {
         );
     }
 
-    /// @notice THE fresh-deployment completion check: after the hand-off, the ecosystem passes exactly
-    ///         the authority check `RegistryBootstrapMigration.validateApplied` runs after a bootstrap.
+    /// @notice THE fresh-deployment completion check: after the hand-off, the ecosystem is in the shape a
+    ///         completed bootstrap leaves — the on-chain authority checks the bootstrap runs pass, and
+    ///         the post-state the tests and protocol-ops assert after one holds.
     function test_freshEcosystem_passesTheBootstrapCompletionCheck() public {
         _runProtocolOpsHandOff();
-        RegistryAuthorityLib.requireRegistryAuthority(_freshAuthority());
+        this.checkFreshAuthority();
+        IChainTypeManager ctm = IChainTypeManager(address(addresses.chainTypeManager));
+        _assertCTMHeldBy(ctm, upgradeExecutors.ctmExecutor);
+        _assertNotifierHeldBy(ctm, upgradeExecutors.ctmExecutor);
+        assertEq(
+            Ownable2Step(ecosystemAddresses.shared.transparentProxyAdmin).owner(),
+            upgradeExecutors.coreExecutor,
+            "the ecosystem ProxyAdmin is the core executor's"
+        );
     }
 
     /// @notice The deploy scripts construct the executors for the deployer and only nominate governance, so
@@ -174,7 +185,8 @@ contract DeployOwnershipHandOffTest is ZKChainDeployer {
 
     /// @dev External so a revert can be expected on it.
     function checkFreshAuthority() external view {
-        RegistryAuthorityLib.requireRegistryAuthority(_freshAuthority());
+        RegistryAuthorityLib.requireExecutorsGoverned(_freshAuthority());
+        RegistryAuthorityLib.requireNotifierBound(_freshAuthority());
     }
 
     /// @dev The accept steps protocol-ops runs: `hub init` (`governanceAcceptOwnerAggregated`, which now also
@@ -203,7 +215,6 @@ contract DeployOwnershipHandOffTest is ZKChainDeployer {
         return
             RegistryAuthorityLib.Authority({
                 ctm: address(addresses.chainTypeManager),
-                ctmProxyAdmin: ProxyAdmin(ctmAddresses.admin.transparentProxyAdmin),
                 serverNotifier: ctmAddresses.stateTransition.proxies.serverNotifier,
                 ctmExecutor: upgradeExecutors.ctmExecutor,
                 coreExecutor: upgradeExecutors.coreExecutor,

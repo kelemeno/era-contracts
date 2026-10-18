@@ -17,8 +17,9 @@
  *   4. CONSUME the committed manifest scripts/registry-manifests/v35-local.json (any drift from the
  *      live deployment fails), or with `REGEN_REGISTRIES=1` EMIT it from the live deployment; then
  *      deploy the `CTMRelease`, the Core-domain `ProxyUpgradeTransition` (plus a CTM-domain one when
- *      the manifest changes a CTM-domain proxy) and the `CTMTransition` from it and `validate()` them.
- *      The transition departs from the CTM's live `currentRelease`.
+ *      the manifest changes a CTM-domain proxy) and the `CTMTransition` from it, and run the
+ *      release's and the transition's `validate()`. The transition departs from the CTM's live
+ *      `currentRelease`.
  *   5. Governance accepts its nomination on both executors (a fresh deployment only nominates it),
  *      then executes ONE bundle through the ecosystem `Governance` (`scheduleTransparent` +
  *      `execute`): `applyL1Upgrade` -> [`applyInfrastructureUpgrade`] -> `applyCTMUpgrade`. A bundle
@@ -69,6 +70,7 @@ import { assertServerNotifierState } from "./bootstrap-upgrade-stage";
 import type { ExpectedCall, UpgradeLeg } from "./governance-bundle";
 import type { ChainRole } from "../core/types";
 import {
+  assertCtmTransitionApplied,
   assertLegsApplied,
   clearGenesisUpgradeTxHash,
   discoverDomainExecutors,
@@ -321,9 +323,10 @@ export async function runRegistryDrivenUpgradeScenario(scenario: RegistryUpgrade
       { kind: "ctmTransition", executor: executors.ctmExecutor, object: objects.transition },
     ];
 
-    // `validate()` is what the executors call on the execution path; running it here makes a
-    // manifest naming an address without code fail in this step rather than mid-upgrade. The row
-    // objects' snapshot validates them, checks their domain and records each row's source.
+    // The CTM runs these `validate()`s itself (the transition's at commit, the release's at
+    // install); running them here makes a manifest naming an address without code fail in this
+    // step rather than mid-upgrade. The row objects' snapshot checks their domain and records each
+    // row's source.
     const releaseContract = new ethers.Contract(objects.release, getAbi("ICTMRelease"), l1Provider);
     const transition = new ethers.Contract(objects.transition, getAbi("ICTMTransition"), l1Provider);
     let rowSnapshots: Awaited<ReturnType<typeof snapshotProxyUpgradeLegs>>;
@@ -405,8 +408,14 @@ export async function runRegistryDrivenUpgradeScenario(scenario: RegistryUpgrade
       live.newVersion.toString(),
       "CTMUpgradeApplied records the new version"
     );
-    await ctmExecutor.validateTransitionApplied(objects.transition);
-    console.log("  ✓ validateTransitionApplied(transition) holds after the bundle");
+    await assertCtmTransitionApplied(
+      l1Provider,
+      ctm.address,
+      objects.transition,
+      live.oldVersion,
+      executors.ctmExecutor
+    );
+    console.log("  ✓ the CTM commits the transition and runs its release; the CTM executor holds the CTM domain");
 
     // The chains' genesis upgrade tx is still pending on the sequencer-less anvil chains (see
     // module docs); cleared once, before the first bump.
@@ -438,11 +447,6 @@ export async function runRegistryDrivenUpgradeScenario(scenario: RegistryUpgrade
       await ctm.currentRelease(),
       objects.release,
       "CTM currentRelease moved to the transition's target release"
-    );
-    assertEq(
-      await ctm.upgradeTransition(live.oldVersion),
-      objects.transition,
-      "CTM transition committed for the departing version"
     );
     assertEq(
       await ctm.upgradeCutHash(live.oldVersion),

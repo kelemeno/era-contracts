@@ -6,7 +6,7 @@ import {Test} from "forge-std/Test.sol";
 import {CTMRelease} from "contracts/upgrades/registry/objects/CTMRelease.sol";
 import {ICTMRelease} from "contracts/upgrades/registry/objects/ICTMRelease.sol";
 import {MockSelfDescribingFacet} from "contracts/dev-contracts/test/MockSelfDescribingFacet.sol";
-import {RegistryDuplicateFacetRow, RegistryDuplicateSelector} from "contracts/common/L1ContractErrors.sol";
+import {RegistryDuplicateSelector} from "contracts/common/L1ContractErrors.sol";
 import {GenesisFacet, ReleaseGenesisData, ReleaseManifest} from "contracts/upgrades/registry/RegistryTypes.sol";
 import {L2_ECOSYSTEM_CONTRACT_COUNT} from "contracts/upgrades/registry/libraries/ContractIdentifiers.sol";
 import {L2PlanFixtures} from "foundry-test/l1/unit/concrete/Upgrades/registry/L2PlanFixtures.sol";
@@ -39,20 +39,21 @@ contract ReleaseFacetRowsTest is Test {
         facetA = address(new MockSelfDescribingFacet(_one(SEL_A)));
     }
 
-    /// A release cannot be CONSTRUCTED with a repeated facet row.
-    function test_releaseConstructionRejectsDuplicateFacetRows() public {
+    /// A repeated facet row pins (construction does not read routing) and is refused when the
+    /// release is installed: the facet's selectors appear twice (objlib-05).
+    function test_validateRejectsARepeatedFacetRow() public {
         GenesisFacet[] memory rows = new GenesisFacet[](2);
         rows[0] = GenesisFacet({facet: facetA, isFreezable: false});
         rows[1] = GenesisFacet({facet: facetA, isFreezable: true});
+        CTMRelease release = new CTMRelease(_manifest(rows));
 
-        vm.expectRevert(abi.encodeWithSelector(RegistryDuplicateFacetRow.selector, facetA));
-        new CTMRelease(_manifest(rows));
+        vm.expectRevert(abi.encodeWithSelector(RegistryDuplicateSelector.selector, SEL_A));
+        release.validate();
     }
 
-    /// And why the constructor check alone is not enough. An object whose creation code wrote the
-    /// manifest itself never ran that check, so `validate()` — which every acceptance point calls
-    /// — has to make it again.
-    function test_validateRejectsDuplicateFacetRowsOnAnObjectTheConstructorNeverSaw() public {
+    /// The check does not depend on the constructor having run: an object whose creation code
+    /// wrote the manifest itself is refused by `validate()` all the same.
+    function test_validateRejectsARepeatedFacetRowOnAnObjectTheConstructorNeverSaw() public {
         GenesisFacet[] memory rows = new GenesisFacet[](2);
         rows[0] = GenesisFacet({facet: facetA, isFreezable: false});
         rows[1] = GenesisFacet({facet: facetA, isFreezable: false});
@@ -63,8 +64,19 @@ contract ReleaseFacetRowsTest is Test {
         // It is a `CTMRelease` in every way a chain can observe...
         assertEq(ICTMRelease(counterfeit).genesisFacets().length, 2, "the counterfeit must serve the duplicate rows");
         // ...and `validate()` still refuses it.
-        vm.expectRevert(abi.encodeWithSelector(RegistryDuplicateFacetRow.selector, facetA));
+        vm.expectRevert(abi.encodeWithSelector(RegistryDuplicateSelector.selector, SEL_A));
         ICTMRelease(counterfeit).validate();
+    }
+
+    /// A codeless facet answers its `selectors()` read with no data, so the release is refused
+    /// without a diagnostic of its own (objlib-11).
+    function test_validateRejectsACodelessFacet() public {
+        GenesisFacet[] memory rows = new GenesisFacet[](1);
+        rows[0] = GenesisFacet({facet: makeAddr("codelessFacet"), isFreezable: false});
+        CTMRelease release = new CTMRelease(_manifest(rows));
+
+        vm.expectRevert(bytes(""));
+        release.validate();
     }
 
     /// Two distinct facets describing one selector: construction does not read routing, so the

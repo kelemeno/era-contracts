@@ -17,7 +17,6 @@ import {IChainTypeManager, ChainTypeManagerInitializeData} from "contracts/state
 import {ICTMRelease} from "contracts/upgrades/registry/objects/ICTMRelease.sol";
 import {ZKsyncOSTestnetVerifier} from "contracts/state-transition/verifiers/ZKsyncOSTestnetVerifier.sol";
 import {DataEncoding} from "contracts/common/libraries/DataEncoding.sol";
-import {ZeroAddress} from "contracts/common/L1ContractErrors.sol";
 import {ICTMDeploymentTracker} from "contracts/core/ctm-deployment/ICTMDeploymentTracker.sol";
 
 import {L1MessageRoot} from "contracts/core/message-root/L1MessageRoot.sol";
@@ -175,8 +174,8 @@ contract ChainTypeManagerValidationTest is UtilsCallMockerTest {
         return ChainTypeManager(address(transparentUpgradeableProxy));
     }
 
-    /// @dev The genesis release is where the CTM reads its initial version from, so it is
-    ///      refused before anything is read from it.
+    /// @dev The genesis release is where the CTM reads its initial version from: a zero one fails
+    ///      that read, which reverts the proxy's initializing delegatecall.
     function test_RevertWhen_initializedWithoutARelease() public {
         vm.startPrank(address(bridgehub));
         ChainTypeManagerInitializeData memory ctmInitializeData = ChainTypeManagerInitializeData({
@@ -185,7 +184,7 @@ contract ChainTypeManagerValidationTest is UtilsCallMockerTest {
             currentRelease: address(0),
             serverNotifier: serverNotifier
         });
-        vm.expectRevert(ZeroAddress.selector);
+        vm.expectRevert("Address: low-level delegate call failed");
         new TransparentUpgradeableProxy(
             address(chainTypeManager),
             admin,

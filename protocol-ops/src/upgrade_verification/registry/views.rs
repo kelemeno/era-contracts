@@ -57,8 +57,6 @@ sol! {
         /// The version the edge lands on: its genesis release's own, read at construction.
         function newProtocolVersion() external view returns (uint256);
         function validate() external view;
-        /// The edge's completion check, the bootstrap bundle's last call.
-        function validateApplied() external view;
     }
 
     /// One governance call of a bootstrap edge, as `RegistryBootstrapSequence` derives it.
@@ -179,14 +177,15 @@ sol! {
         function getManifest() external view returns (ProxyUpgradeTransitionManifest memory);
         function domain() external view returns (uint8);
         function rows() external view returns (ProxyUpgradeRow[] memory);
-        function validate() external view;
     }
 
     /// The live owner and outstanding nomination of an `Ownable2Step` lifecycle object.
+    /// `transferOwnership` is declared to ENCODE the bootstrap's ecosystem ProxyAdmin hand-over.
     #[sol(rpc)]
     contract Ownable2StepView {
         function owner() external view returns (address);
         function pendingOwner() external view returns (address);
+        function transferOwnership(address newOwner) external;
     }
 
     /// Positional mirror of `RegistryTypes.GenesisFacet`.
@@ -218,11 +217,18 @@ sol! {
         bytes l2SystemProxyBytecodeInfo;
     }
 
-    /// The release's own reads, including the manifest its address commits to.
+    /// The release's own reads, including the manifest its address commits to. `validate()` is
+    /// state-independent, so its `eth_call` before the vote predicts the install; the errors are
+    /// the ones it reverts with.
     #[sol(rpc)]
     contract CTMReleaseView {
+        error RegistryTargetHasNoCode(address target);
+        error RegistryEmptySelectors(address facet);
+        error RegistryDuplicateSelector(bytes4 selector);
+
         function manifestHash() external view returns (bytes32);
         function getManifest() external view returns (ReleaseManifest memory);
+        function protocolVersion() external view returns (uint256);
         function validate() external view;
     }
 
@@ -259,8 +265,9 @@ sol! {
     }
 
     /// The CTM's bytecode supplier. `evmPublishingBlock` is the exact read
-    /// `L2PlanLib.requirePublished` performs when the CTM leg applies, so a zero here is the
-    /// readiness failure that would revert `applyCTMUpgrade`. The event carries the published code.
+    /// `L2PlanLib.requirePublished` performs when the CTM commits a transition (and the bootstrap
+    /// migration's `validate()`), so a zero here is the readiness failure that would revert it.
+    /// The event carries the published code.
     #[sol(rpc)]
     contract BytecodesSupplierView {
         event EVMBytecodePublished(bytes32 indexed bytecodeHash, bytes bytecode);
@@ -349,6 +356,7 @@ sol! {
         function L1_BYTECODES_SUPPLIER() external view returns (address);
         function L1_INTEROP_FEE_MANAGER() external view returns (address);
         function BRIDGE_HUB() external view returns (address);
+        function INTEROP_CENTER() external view returns (address);
         function serverNotifierAddress() external view returns (address);
         function validatorTimelockPostV29() external view returns (address);
         function PERMISSIONLESS_VALIDATOR() external view returns (address);

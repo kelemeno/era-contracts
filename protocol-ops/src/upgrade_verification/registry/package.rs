@@ -16,7 +16,7 @@
 //!   their addresses and the executors they are sent to.
 //! * a BOOTSTRAP edge, the one-time migration onto the registry model: the bundle calls
 //!   `migrate()`. Governance executes the list a `RegistryBootstrapSequence` derives (the core
-//!   transition rides it), ending in the edge's completion check.
+//!   transition rides it), ending in `migrate()`.
 //! * a transition REPLACEMENT: one `CTMUpgradeExecutor.forward` carrying
 //!   `ChainTypeManager.replaceUpgradeTransition` (see
 //!   `protocol-docs/ecosystem-upgrade-coordination.md#replacing-a-committed-transition`), and no
@@ -66,6 +66,20 @@ impl RegistryPackage {
     /// is REFUSED rather than verified as the nearest match: it is an input this tool cannot
     /// review.
     pub(crate) fn load(ecosystem_toml: &Path) -> anyhow::Result<Self> {
+        Self::load_if_registry(ecosystem_toml)?.with_context(|| {
+            format!(
+                "{} is neither kind of package this tool reviews: its governance bundle calls no \
+                 executor entrypoint (applyL1Upgrade, applyInfrastructureUpgrade, \
+                 applyCTMUpgrade), no `migrate()` and no `forward` that replaces a transition, so \
+                 this tool cannot say what it does",
+                ecosystem_toml.display()
+            )
+        })
+    }
+
+    /// [`Self::load`], except that a bundle carrying none of the three kinds' calls is `None`
+    /// rather than refused: a governance TOML that is not a registry package at all.
+    pub(crate) fn load_if_registry(ecosystem_toml: &Path) -> anyhow::Result<Option<Self>> {
         let root = read_toml(ecosystem_toml)?;
         let calls = bundle_in(&root)?;
         let legs = recover_legs(&calls)?;
@@ -90,11 +104,11 @@ impl RegistryPackage {
                     leg.index
                 );
             }
-            return Ok(Self::Bootstrap(BootstrapPackage::load(
+            return Ok(Some(Self::Bootstrap(BootstrapPackage::load(
                 ecosystem_toml,
                 &root,
                 calls,
-            )?));
+            )?)));
         }
         if let Some(forward) = replacement {
             if let Some(leg) = legs.first() {
@@ -106,28 +120,22 @@ impl RegistryPackage {
                     leg.index
                 );
             }
-            return Ok(Self::Replacement(Box::new(ReplacementPackage::load(
+            return Ok(Some(Self::Replacement(Box::new(ReplacementPackage::load(
                 ecosystem_toml,
                 &root,
                 forward,
                 calls,
-            )?)));
+            )?))));
         }
         if legs.is_empty() {
-            anyhow::bail!(
-                "{} is neither kind of package this tool reviews: its governance bundle calls no \
-                 executor entrypoint (applyL1Upgrade, applyInfrastructureUpgrade, \
-                 applyCTMUpgrade), no `migrate()` and no `forward` that replaces a transition, so \
-                 this tool cannot say what it does",
-                ecosystem_toml.display()
-            );
+            return Ok(None);
         }
-        Ok(Self::Upgrade(UpgradePackage::load(
+        Ok(Some(Self::Upgrade(UpgradePackage::load(
             ecosystem_toml,
             &root,
             calls,
             legs,
-        )?))
+        )?)))
     }
 }
 
@@ -333,9 +341,10 @@ pub(crate) struct UpgradePackage {
     /// `[ctms.*.deployed_addresses] transparent_proxy_admin` — likewise for the executor's
     /// `CTM_PROXY_ADMIN`.
     pub(crate) reported_ctm_proxy_admin: Option<Address>,
-    /// `[core.upgrade_addresses.bridgehub] bridgehub_proxy_addr` — where the ecosystem inventory's
-    /// slots are discovered when the package names no CTM to read the Bridgehub from.
-    pub(crate) reported_bridgehub: Option<Address>,
+    /// The ecosystem's Bridgehub and the CTM domain's singletons as the prepares report them. The
+    /// Bridgehub is where the ecosystem inventory's slots are discovered when the package names no
+    /// CTM to read it from.
+    pub(crate) reported_singletons: ReportedSingletons,
     /// `[governance_calls] calls` — the one bundle governance signs.
     pub(crate) calls: Vec<GovernanceCall>,
     /// The prepare's declared external actions — the calls no leg describes.
@@ -386,16 +395,7 @@ impl UpgradePackage {
             reported_ctm_executor: ctm_registry("ctm_upgrade_executor_addr"),
             reported_ctm: ctm_section("state_transition", "chain_type_manager_proxy"),
             reported_ctm_proxy_admin: ctm_section("deployed_addresses", "transparent_proxy_admin"),
-            reported_bridgehub: address_at(
-                root,
-                &[
-                    "core",
-                    "upgrade_addresses",
-                    "bridgehub",
-                    "bridgehub_proxy_addr",
-                ],
-            )
-            .filter(|a| !a.is_zero()),
+            reported_singletons: ReportedSingletons::in_package(root, ctm_key.as_deref()),
             external_actions: external_actions_in(root)?,
             create2_salts: create2_salts_in(root, ctm_key.as_deref()),
             force_deployments_data: ctm_key
@@ -526,6 +526,42 @@ pub(crate) struct LifecycleInputs {
     pub(crate) core_proxy_admin: Option<Address>,
 }
 
+/// The ecosystem's Bridgehub and the CTM domain's singleton proxies as the prepares report them —
+/// the last fallbacks a new `ChainTypeManager` implementation's immutables are held against.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct ReportedSingletons {
+    /// `[core.upgrade_addresses.bridgehub] bridgehub_proxy_addr`.
+    pub(crate) bridgehub: Option<Address>,
+    /// `[ctms.*.state_transition] bytecodes_supplier_addr`.
+    pub(crate) bytecodes_supplier: Option<Address>,
+    /// `[ctms.*.state_transition] permissionless_validator_addr`.
+    pub(crate) permissionless_validator: Option<Address>,
+    /// `[ctms.*.state_transition] interop_fee_manager_proxy_addr`.
+    pub(crate) interop_fee_manager: Option<Address>,
+}
+
+impl ReportedSingletons {
+    fn in_package(root: &toml::Value, ctm_key: Option<&str>) -> Self {
+        let state_transition =
+            |key: &str| ctm_key.and_then(|ctm| ctm_address(root, ctm, "state_transition", key));
+        Self {
+            bridgehub: address_at(
+                root,
+                &[
+                    "core",
+                    "upgrade_addresses",
+                    "bridgehub",
+                    "bridgehub_proxy_addr",
+                ],
+            )
+            .filter(|a| !a.is_zero()),
+            bytecodes_supplier: state_transition("bytecodes_supplier_addr"),
+            permissionless_validator: state_transition("permissionless_validator_addr"),
+            interop_fee_manager: state_transition("interop_fee_manager_proxy_addr"),
+        }
+    }
+}
+
 fn lifecycle_inputs_in(root: &toml::Value) -> LifecycleInputs {
     LifecycleInputs {
         core_executor: address_at(root, &["core", "registry", "core_upgrade_executor_addr"])
@@ -560,6 +596,8 @@ pub(crate) struct BootstrapPackage {
     /// `[ctms.*.deployed_addresses] transparent_proxy_admin`, a cross-check on the manifest's
     /// CTM-domain ProxyAdmin.
     pub(crate) reported_ctm_proxy_admin: Option<Address>,
+    /// See [`UpgradePackage::reported_singletons`].
+    pub(crate) reported_singletons: ReportedSingletons,
     /// The CTM key under `[ctms]` this package upgrades (e.g. `zksync_os`).
     pub(crate) ctm_key: String,
     /// `[governance_calls] calls` — the one bundle governance signs.
@@ -756,8 +794,8 @@ impl BootstrapPackage {
         let release = registry_address(root, &ctm_key, "ctm_release_addr")
             .context("[ctms.*.registry] ctm_release_addr missing, zero or unparsable")?;
         // The core leg is optional: a CTM-only edge deploys no ecosystem implementations, so
-        // the prepare pins no Core-domain `ProxyUpgradeTransition` (an all-inert inventory is
-        // refused at construction).
+        // the prepare pins no Core-domain `ProxyUpgradeTransition` (the verifier refuses an
+        // all-inert one).
         let core_transition = address_at(root, &["core", "registry", "core_transition_addr"])
             .filter(|a| !a.is_zero());
 
@@ -779,6 +817,7 @@ impl BootstrapPackage {
                 "deployed_addresses",
                 "transparent_proxy_admin",
             ),
+            reported_singletons: ReportedSingletons::in_package(root, Some(&ctm_key)),
             calls,
             external_actions: external_actions_in(root)?,
             create2_salts: create2_salts_in(root, Some(&ctm_key)),
@@ -1290,7 +1329,7 @@ mod tests {
         assert_eq!(package.ctm_key.as_deref(), Some("zksync_os"));
         assert_eq!(package.reported_ctm, Some(CTM_PROXY));
         assert_eq!(package.reported_ctm_proxy_admin, Some(CTM_ADMIN));
-        assert_eq!(package.reported_bridgehub, Some(BRIDGEHUB));
+        assert_eq!(package.reported_singletons.bridgehub, Some(BRIDGEHUB));
         assert_eq!(package.lifecycle.core_executor, Some(CORE_EXECUTOR));
         assert_eq!(package.lifecycle.core_proxy_admin, Some(ECO_ADMIN));
         assert_eq!(
@@ -1361,6 +1400,35 @@ mod tests {
             &[call(STRANGER, vec![0xde, 0xad, 0xbe, 0xef])],
         );
         assert!(err.contains("neither kind of package"), "{err}");
+    }
+
+    /// The post-replay check asks whether a governance TOML is a registry package at all: one
+    /// that is none of the three kinds is `None` there (not refused), while a registry package
+    /// still loads — or is refused — exactly as `load` would.
+    #[test]
+    fn only_a_bundle_of_none_of_the_kinds_is_not_a_registry_package() {
+        let load_if = |summary: &Summary, calls: &[GovernanceCall]| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("ecosystem.toml");
+            std::fs::write(&path, summary.toml(calls)).unwrap();
+            RegistryPackage::load_if_registry(&path)
+        };
+        let none = Summary::of(false, false, false);
+        assert!(load_if(&none, &[]).unwrap().is_none());
+        assert!(
+            load_if(&none, &[call(STRANGER, vec![0xde, 0xad, 0xbe, 0xef])])
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            load_if(
+                &Summary::all(),
+                &[core_leg(), infrastructure_leg(), transition_leg()]
+            ),
+            Ok(Some(RegistryPackage::Upgrade(_)))
+        ));
+        let err = load_if(&Summary::all(), &[core_leg()]).expect_err("a missing leg is refused");
+        assert!(format!("{err:#}").contains("missing leg"), "{err:#}");
     }
 
     /// A pre-collapse package — per-stage keys instead of the one `calls` — is refused rather

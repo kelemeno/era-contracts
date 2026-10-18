@@ -154,8 +154,8 @@ interface IChainTypeManager {
 
     /// @notice Replaces the transition committed for an already-departed version, without moving
     ///         the CTM's version or release. Compare-and-replace: `_expectedTransition` must be the
-    ///         one committed now, and `_replacement` must depart from the same release with the
-    ///         same pinned deadline and land on a release a chain can continue from.
+    ///         one committed now, and `_replacement` must depart from the same release and land on a
+    ///         release a chain can continue from.
     /// @param _expectedTransition The transition currently committed for the departed version.
     /// @param _replacement The transition chains departing that version execute from now on.
     function replaceUpgradeTransition(ICTMTransition _expectedTransition, ICTMTransition _replacement) external;

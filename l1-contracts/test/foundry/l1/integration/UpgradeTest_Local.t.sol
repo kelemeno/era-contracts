@@ -41,6 +41,7 @@ import {ICTMRelease} from "contracts/upgrades/registry/objects/ICTMRelease.sol";
 import {ChainRouting} from "test-utils/ChainRouting.sol";
 import {IL1GenesisUpgrade} from "contracts/upgrades/IL1GenesisUpgrade.sol";
 import {RegistryBootstrapMigration} from "contracts/upgrades/registry/bootstrap/RegistryBootstrapMigration.sol";
+import {RegistryPostState} from "../unit/concrete/Upgrades/registry/RegistryPostState.sol";
 import {L2CanonicalTransactionLib} from "contracts/state-transition/libraries/L2CanonicalTransactionLib.sol";
 import {L2CanonicalTransaction} from "contracts/common/Messaging.sol";
 import {BootstrapManifest, ProxyUpgradeRow} from "contracts/upgrades/registry/RegistryTypes.sol";
@@ -134,9 +135,9 @@ contract ChainUpgradeForLocalTest is DefaultChainUpgrade {
 /// @notice The fixture the v35 BOOTSTRAP edge leaves behind, built through the real prepare
 ///         pipeline: a fresh ecosystem + Era chain at the baseline version, `CTMUpgrade_v35`
 ///         deploying the executor + `RegistryBootstrapMigration`, and the one governance bundle
-///         `RegistryBootstrapSequence` derives (bindings, the ecosystem handover and core leg,
-///         nominate the CTM, hand over its ProxyAdmin, `migrate()` — which itself completes the
-///         executor's accept — and the completion check) performing the whole edge.
+///         `RegistryBootstrapSequence` derives (the notifier accept, the ecosystem handover and core
+///         leg, nominate the CTM, hand over its ProxyAdmin, and `migrate()` — which itself
+///         completes the executor's accept) performing the whole edge.
 /// @dev Abstract so the post-bootstrap state can be reused: it is the only in-forge fixture whose
 ///      ecosystem is registry-driven, which is what a RECURRING prepare needs to run against (see
 ///      `UpgradeTestRecurring_Local.t.sol`). Heavy execution + event assertions run in
@@ -145,7 +146,8 @@ abstract contract UpgradeIntegrationBootstrapFixture is
     UpgradeIntegrationTestBase,
     L1ContractDeployer,
     ZKChainDeployer,
-    TokenDeployer
+    TokenDeployer,
+    RegistryPostState
 {
     using stdToml for string;
 
@@ -582,8 +584,8 @@ contract UpgradeIntegrationTestLocal is UpgradeIntegrationBootstrapFixture {
     ///      and declared by the CTM prepare; the core prepare of this edge declares nothing, so the
     ///      merged bundle is exactly the object's. The harness already executed it green in
     ///      `internalTest`; this asserts the emitted shape (the notifier accept first, the ecosystem
-    ///      handover and core leg, the completion check last), that the completion check holds, and
-    ///      the notifier handover.
+    ///      handover and core leg, the edge itself last), the post-state the edge leaves, and the
+    ///      notifier handover.
     function _assertBootstrapJoinsTheRegistryModel(
         CTMUpgradeForLocalTest _bootstrap,
         address _ctm,
@@ -594,7 +596,7 @@ contract UpgradeIntegrationTestLocal is UpgradeIntegrationBootstrapFixture {
         RegistryBootstrapMigration migration = _bootstrap.bootstrapMigration();
         address coreExecutor = address(coreUpgrade.getCoreUpgradeExecutor());
         Call[] memory bundle = _bootstrap.prepareGovernanceCalls();
-        assertEq(bundle.length, 7, "v35 bundle: the notifier accept, the core leg, the CTM handover, the edge");
+        assertEq(bundle.length, 6, "v35 bundle: the notifier accept, the core leg, the CTM handover, the edge");
         assertEq(bundle[0].target, _executor, "the notifier accept opens the bundle");
         assertEq(
             bundle[1].target,
@@ -607,17 +609,15 @@ contract UpgradeIntegrationTestLocal is UpgradeIntegrationBootstrapFixture {
             abi.encodeCall(CoreUpgradeExecutor.applyL1Upgrade, (coreUpgrade.coreTransition())),
             "applyL1Upgrade(coreTransition)"
         );
-        assertEq(bundle[5].target, address(migration), "then the edge itself");
+        assertEq(bundle[5].target, address(migration), "and the edge itself closes it");
         assertEq(bundle[5].data, abi.encodeCall(RegistryBootstrapMigration.migrate, ()), "migrate()");
-        assertEq(bundle[6].target, address(migration), "and the completion check closes it");
-        assertEq(bundle[6].data, abi.encodeCall(RegistryBootstrapMigration.validateApplied, ()), "validateApplied()");
         assertEq(
             _bootstrap.externalActionEntries().length,
-            9,
-            "the CTM prepare declares the 7 derived governance calls and the 2 handover admin calls"
+            8,
+            "the CTM prepare declares the 6 derived governance calls and the 2 handover admin calls"
         );
         assertEq(coreUpgrade.externalActionEntries().length, 0, "the core prepare of a derived edge authors nothing");
-        migration.validateApplied();
+        _assertBootstrapApplied(migration);
         assertEq(_bootstrap.bootstrapSequence().MIGRATION(), address(migration), "the sequence names this edge");
         assertEq(
             IOwnable(address(CoreUpgradeExecutor(payable(coreExecutor)).PROXY_ADMIN())).owner(),

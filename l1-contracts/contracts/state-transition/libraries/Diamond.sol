@@ -13,8 +13,7 @@ import {
     RemoveFunctionFacetAddressNotZero,
     RemoveFunctionFacetAddressZero,
     ReplaceFunctionFacetAddressZero,
-    SelectorsMustAllHaveSameFreezability,
-    UndefinedDiamondCutAction
+    SelectorsMustAllHaveSameFreezability
 } from "../../common/L1ContractErrors.sol";
 
 /// @author Matter Labs
@@ -125,10 +124,8 @@ library Diamond {
                 _addFunctions(facet, selectors, isFacetFreezable);
             } else if (action == Action.Replace) {
                 _replaceFunctions(facet, selectors, isFacetFreezable);
-            } else if (action == Action.Remove) {
-                _removeFunctions(facet, selectors);
             } else {
-                revert UndefinedDiamondCutAction();
+                _removeFunctions(facet, selectors);
             }
         }
 

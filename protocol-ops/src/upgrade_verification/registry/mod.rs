@@ -28,17 +28,20 @@
 //!      produces for its role? ([`provenance`], [`members`]) — the live code against the
 //!      reviewed artifact, byte for byte outside its immutable slots: each release's facets,
 //!      `DiamondInit`, genesis upgrade and verifier tree, each L2 bytecode the release's table or
-//!      a plan names, each engine and composer, each row's `implNew`.
-//!   3. Does every proxy inventory belong to the domain its leg applies, and does every row name
-//!      the proxy of its slot, discovered on chain from the Bridgehub or the CTM? ([`rows`])
+//!      a plan names, each engine and composer, each row's `implNew` — and, for a new
+//!      `ChainTypeManager` implementation, the constructor immutables that comparison masks.
+//!   3. Does every proxy inventory belong to the domain its leg applies, upgrade something, and
+//!      hold only real edges, each naming the proxy of its slot, discovered on chain from the
+//!      Bridgehub or the CTM? ([`rows`])
 //!   4. Does every release the package installs pin the reviewed genesis — the genesis config's
-//!      root and the force deployments the prepare wrote? ([`genesis`])
+//!      root and the force deployments the prepare wrote ([`genesis`]) — and pass its own
+//!      `validate()`, which the CTM runs when it installs it?
 //!   5. Is authority bound where the review says — each executor to the independently reviewed
 //!      CTM and ProxyAdmin — and to the expected governance owner, with no nomination outstanding
 //!      on any authority the upgrade drives?
 //!   6. Does every proxy row depart from the implementation that is actually live, read through
-//!      its domain's `ProxyAdmin`? ([`rows`]) A pre-execution check only — the bootstrap's
-//!      completion check does not re-read implementations (`docs/registry-driven-upgrades.md`).
+//!      its domain's `ProxyAdmin`? ([`rows`]) A pre-execution check only; what a replayed bundle
+//!      leaves behind is checked by `ecosystem upgrade-governance` ([`applied`]).
 //!   7. Do chains crossing an edge keep the system-proxy logic new chains get? ([`shell`])
 //!   8. Does the transaction governance signs invoke the reviewed upgrade, at the reviewed
 //!      addresses, as one contiguous run in canonical order — and is every other call a reviewed
@@ -56,8 +59,8 @@
 //! It does not re-derive facet cuts, L2 transactions or proposals. Those are derived on-chain
 //! from the release pair, and `TransitionDerivationLib` is audited code — re-deriving them here
 //! would be a second implementation to keep in sync, which is exactly what the registry model
-//! set out to remove. It also does not call the objects' own `validate()`: that runs against
-//! post-execution state, so beforehand it reverts by design and tells a reviewer nothing.
+//! set out to remove. The only object `validate()` it calls is the arriving release's, which
+//! reads no live state; the others judge the state at execution, which a review cannot see.
 
 use alloy::primitives::{Address, B256, U256};
 use alloy::providers::Provider;
@@ -67,6 +70,7 @@ use crate::common::ethereum::get_provider;
 use crate::upgrade_verification::contract_hashes::contract_hashes_path;
 use crate::upgrade_verification::report::VerificationResult;
 
+pub(crate) mod applied;
 pub(crate) mod bootstrap;
 pub(crate) mod construction;
 pub(crate) mod genesis;

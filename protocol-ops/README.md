@@ -76,9 +76,14 @@ that order or not at all (see
 Every call but a leg is declared in `external_actions`, and each prepare must emit its declared actions in
 declaration order. The merge refuses a package that would leave a reported object unapplied or that upgrades
 nothing, and a leg whose executor is missing or zero. The bootstrap edge derives no leg: its bundle is the list
-`RegistryBootstrapSequence.actions()` derives (the core transition included), ending in the edge's completion
-check `validateApplied()`, so an edge that does not complete reverts the whole bundle. `ecosystem
-upgrade-governance` replays that bundle on a fork as the governance owner.
+`RegistryBootstrapSequence.actions()` derives (the core transition included), ending in `migrate()`. `ecosystem
+upgrade-governance` replays that bundle on a fork as the governance owner, then holds the fork against what a
+registry package must leave behind, since the contracts no longer check their own completion: the CTM at the
+target version and release with the transition committed for its departure (the release at the CTM's version),
+every row's proxy at its `implNew`, the CTM, its ProxyAdmin and its ServerNotifier owned by the CTM executor with
+no nomination and the notifier bound to the CTM, the ecosystem ProxyAdmin owned by the core executor, and every
+executor owned by governance with no nomination (for a replacement, the CTM committing the replacement). Any unmet
+expectation fails the command.
 
 A fresh ecosystem (`ecosystem init`, or `hub init` + `ctm init`) is born into the registry model: the
 deployer creates the core executor and the CTM executor, hands them the ProxyAdmins, the CTM and the
@@ -206,7 +211,13 @@ package is held against (required unless the package is a replacement), the lega
 addresses against zero, and each bytecode field against the release's own L2 bytecode table. The
 arriving release's system-proxy shell is compared with the departing one's, compiler metadata
 stripped: a logic change fails unless the edge ships a delegate the reviewed commit builds other
-than the stock `L2DefaultUpgrade`, which is then reported for the reviewer to confirm.
+than the stock `L2DefaultUpgrade`, which is then reported for the reviewer to confirm. The
+release's own `validate()` is called as well: it reads no state, and the CTM runs it exactly once,
+when it installs the release, so a revert — a codeless `diamondInit`, `genesisUpgrade` or verifier
+(`RegistryTargetHasNoCode`), a facet with no selectors (`RegistryEmptySelectors`), a selector two
+facets route (`RegistryDuplicateSelector`), or a facet that has no code or does not answer
+`selectors()` (a revert without data) — fails the run before the vote rather than governance's
+execution.
 
 **What the objects' members run** is held against the reviewed build too. An L1 member's live code
 is compared with the reviewed artifact of each contract its role admits, byte for byte outside the
@@ -241,7 +252,21 @@ core prepare's `bridgehub_proxy_addr` for a core-only package naming no CTM) and
 `chainRegistrationSender()`, the nullifier's `l1InteropHandler()`; the CTM itself and its
 `validatorTimelockPostV29()`, `L1_BYTECODES_SUPPLIER()`, `PERMISSIONLESS_VALIDATOR()` and
 `serverNotifierAddress()`. A row naming another proxy, a row in a slot that is no proxy of its
-domain, and an inventory whose length is not its enum's each fail the run.
+domain, and an inventory whose length is not its enum's each fail the run, and so does a malformed
+inventory the contracts no longer refuse: a row with a zero proxy or a zero `expectedOldImpl`, a
+self-edge (`expectedOldImpl == implNew`, which applies as a no-op), two rows naming one proxy, and a
+`ProxyUpgradeTransition` with no participating row at all (omit the leg instead).
+
+A new `ChainTypeManager` implementation's constructor immutables — `BRIDGE_HUB`, `INTEROP_CENTER`,
+`L1_BYTECODES_SUPPLIER`, `PERMISSIONLESS_VALIDATOR`, `L1_INTEROP_FEE_MANAGER` — are masked by the
+code comparison, so they are read off the implementation and held against the live CTM's own
+getter (unchanged across the swap), else the inventory row of the slot they name, else the proxy
+the package reports for that slot (`[ctms.*.state_transition]`) once the CTM-domain ProxyAdmin is
+shown to administer it and it runs the slot's reviewed contract — a singleton the upgrade
+introduces, like the v35 bootstrap's `L1InteropFeeManager`. `BRIDGE_HUB` falls back to the
+package's `bridgehub_proxy_addr`, `INTEROP_CENTER` to the L2 built-in `L2_INTEROP_CENTER_ADDR`. A
+zero value, or one nothing establishes, fails the run; `PERMISSIONLESS_VALIDATOR` is written into
+every new chain once.
 
 `--contract-hashes <path>` replaces the committed `AllContractsHashes.json` the local build and the
 live code are held against. It exists for harnesses that verify deployments of an uncommitted build
@@ -254,7 +279,9 @@ state: the replacement's construction as for any transition, the same source rel
 transition's, not the CTM's current one) and pinned deadline, `upgradeTransition[departure]` still
 the expected one and not the replacement, a departure below the CTM's version, a target no earlier
 than the replaced one that is the CTM's current release at its version or else the source of the
-edge committed onward from it, and the replacement's L2 bytecodes published. The effective deadline
+edge committed onward from it, and the replacement's L2 bytecodes published. The CTM itself no
+longer refuses a replacement identical to the replaced transition, one pinning another deadline or
+one landing earlier; those three stay errors of this review. The effective deadline
 and any `setProtocolVersionDeadline` riding the `forward` are reported. The destination is an
 existing release, possibly built by an earlier commit, so neither its genesis nor its members are
 judged on this path; the replacement's own engine, composer and L2 bytecodes are.
@@ -268,18 +295,21 @@ other call must be a declared governance external action, matched one for one an
 with every declaration present, and none may reach the upgrade's authorities (the executors, the
 objects, the CTM, either ProxyAdmin) whether declared or not. For the
 bootstrap edge the bundle must END with the run `actions()` of the construction-verified sequence
-derives, in order — whose last call is `validateApplied()` on the migration, so a failing completion
-check reverts the whole bootstrap — and every call before it must be a declared external action to
+derives, in order — whose last call is `migrate()` on the migration, with the ecosystem
+ProxyAdmin handed to the core executor before it (`migrate()` no longer checks that) — and every
+call before it must be a declared external action to
 a target outside the edge's authorities: an extra call to the CTM, a `ProxyAdmin`, an executor or an
 object is an error whether declared or not. A replacement's bundle must carry the one `forward`,
 sent to the executor that owns the CTM, and nothing else may reach the CTM or its executor.
 
 Around those it checks what the objects cannot answer for themselves: authority bound where the
 review says (governance owning each executor with no nomination outstanding, the CTM executor bound
-to the reviewed CTM and CTM-domain ProxyAdmin, the core executor to the ecosystem ProxyAdmin, and
-each domain still held by its executor), the
+to the reviewed CTM and CTM-domain ProxyAdmin, the core executor to the ecosystem ProxyAdmin, no
+binding zero — the executor constructors no longer refuse one — and each domain still held by its
+executor), the
 live state the upgrade departs from, and readiness — the L2 factory dependencies published on the
-CTM's supplier. Readiness is reported apart
+CTM's supplier, which the CTM's commit requires (and, for the bootstrap edge, the migration's
+`validate()`). Readiness is reported apart
 from anything about value. For the bootstrap edge it also lists, as warnings, every chain on the
 CTM still below the departing version: those chains keep upgrading along the pre-registry edges
 through the CTM's legacy `protocolVersionVerifier` getter.

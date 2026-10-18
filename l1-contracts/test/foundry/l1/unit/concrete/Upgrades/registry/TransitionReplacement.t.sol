@@ -29,12 +29,7 @@ import {
     TransitionNotCommitted,
     TransitionReleaseMismatch
 } from "contracts/common/L1ContractErrors.sol";
-import {
-    LegacyCutForRegistryDrivenVersion,
-    TransitionDeadlineMismatch,
-    UpgradeTransitionUnchanged
-} from "contracts/state-transition/L1StateTransitionErrors.sol";
-import {ProtocolVersionTooSmall} from "contracts/upgrades/ZkSyncUpgradeErrors.sol";
+import {LegacyCutForRegistryDrivenVersion} from "contracts/state-transition/L1StateTransitionErrors.sol";
 import {AuthoredL2Plan, TransitionManifest} from "contracts/upgrades/registry/RegistryTypes.sol";
 
 /// @notice `ChainTypeManager.replaceUpgradeTransition`: governance repairs the transition committed
@@ -311,27 +306,21 @@ contract TransitionReplacementTest is ChainTypeManagerTest, RegistryDrivenUpgrad
         assertEq(chainContractAddress.upgradeTransition(0), address(transitionV32));
     }
 
+    /// @dev The departure is read off the expected transition first; on a codeless address that
+    ///      read fails without data.
     function test_revertWhen_theExpectedTransitionIsNotDeployed() public {
         _commitAndComplete(transitionV32);
         CTMTransition repaired = _transition(_r0(), _r32(), defaultUpgrade, FIXTURE_DEADLINE, _delegatePlan());
         address codeless = makeAddr("codelessTransition");
-        _expectReplaceRevert(
-            CTMTransition(codeless),
-            repaired,
-            0,
-            abi.encodeWithSelector(RegistryTargetHasNoCode.selector, codeless)
-        );
+        _expectReplaceRevert(CTMTransition(codeless), repaired, 0, "");
     }
 
+    /// @dev The replacement's own `validate()` is the first call to it; a codeless replacement
+    ///      fails it without data, and the mapping is unchanged (ctm-14).
     function test_revertWhen_theReplacementIsNotDeployed() public {
         _commitAndComplete(transitionV32);
         address codeless = makeAddr("codelessTransition");
-        _expectReplaceRevert(
-            transitionV32,
-            CTMTransition(codeless),
-            0,
-            abi.encodeWithSelector(RegistryTargetHasNoCode.selector, codeless)
-        );
+        _expectReplaceRevert(transitionV32, CTMTransition(codeless), 0, "");
     }
 
     /// @dev Compare-and-replace: a proposal naming a transition that is no longer the committed
@@ -364,14 +353,16 @@ contract TransitionReplacementTest is ChainTypeManagerTest, RegistryDrivenUpgrad
         );
     }
 
-    function test_revertWhen_theReplacementIsTheCommittedTransition() public {
+    /// @dev Replacing a transition with itself is not refused on chain (ctm-16): the commitment
+    ///      does not change and only the events repeat. protocol-ops reports it
+    ///      (`judge_replacement_state`).
+    function test_replacingATransitionWithItselfChangesNothing() public {
         _commitAndComplete(transitionV32);
-        _expectReplaceRevert(
-            transitionV32,
-            transitionV32,
-            0,
-            abi.encodeWithSelector(UpgradeTransitionUnchanged.selector, address(transitionV32))
-        );
+        vm.expectEmit(true, true, true, true, address(chainContractAddress));
+        emit IChainTypeManager.UpgradeTransitionReplaced(0, address(transitionV32), address(transitionV32));
+        _replace(transitionV32, transitionV32);
+        assertEq(chainContractAddress.upgradeTransition(0), address(transitionV32), "the commitment is unchanged");
+        assertEq(chainContractAddress.protocolVersionDeadline(0), FIXTURE_DEADLINE, "and so is the deadline");
     }
 
     /// @dev The replacement's own check surface runs: an engine whose code is gone is refused.
@@ -400,9 +391,11 @@ contract TransitionReplacementTest is ChainTypeManagerTest, RegistryDrivenUpgrad
         );
     }
 
-    /// @dev A deadline change is a separate `setProtocolVersionDeadline`, never a side effect of a
-    ///      replacement.
-    function test_revertWhen_theReplacementPinsAnotherDeadline() public {
+    /// @dev A replacement pinning another deadline is not refused on chain (ctm-19): the effective
+    ///      deadline resolves from the committed transition, so it moves with it. Governance moves a
+    ///      deadline explicitly with `setProtocolVersionDeadline`; protocol-ops reports a replacement
+    ///      that moves it as a side effect (`judge_replacement_state`).
+    function test_aReplacementPinningAnotherDeadlineMovesTheEffectiveDeadline() public {
         _commitAndComplete(transitionV32);
         CTMTransition laterDeadline = _transition(
             _r0(),
@@ -411,22 +404,36 @@ contract TransitionReplacementTest is ChainTypeManagerTest, RegistryDrivenUpgrad
             FIXTURE_DEADLINE + 1000,
             _delegatePlan()
         );
-        _expectReplaceRevert(
-            transitionV32,
-            laterDeadline,
-            0,
-            abi.encodeWithSelector(TransitionDeadlineMismatch.selector, FIXTURE_DEADLINE, FIXTURE_DEADLINE + 1000)
-        );
+        _replace(transitionV32, laterDeadline);
+        assertEq(chainContractAddress.upgradeTransition(0), address(laterDeadline));
+        assertEq(chainContractAddress.protocolVersionDeadline(0), FIXTURE_DEADLINE + 1000, "the deadline moved");
     }
 
-    function test_revertWhen_theReplacementLandsBeforeTheReplacedTarget() public {
+    /// @dev A replacement may land below the target of the transition it replaces (ctm-20), as long
+    ///      as it lands on the source of the edge committed onward from there: a chain still
+    ///      reaches the CTM's version, one edge later. protocol-ops reports the lower target
+    ///      (`judge_replacement_state`); the version itself still only moves forward, because a
+    ///      transition never pins a non-increasing edge (`VersionEdgeLib`).
+    function test_aReplacementWithALowerTargetAndAnOnwardEdgeStillReachesTheCTMVersion() public {
         _commitAndComplete(transitionV32);
         _commitAndComplete(transitionV33);
         CTMTransition bypass = _transition(_r0(), _r33(), defaultUpgrade, FIXTURE_DEADLINE, _delegatePlan());
         CTMTransition repaired = _transition(_r0(), _r32(), defaultUpgrade, FIXTURE_DEADLINE, _delegatePlan());
         _replace(transitionV32, bypass);
 
-        _expectReplaceRevert(bypass, repaired, 0, abi.encodeWithSelector(ProtocolVersionTooSmall.selector, V33, V32));
+        _replace(bypass, repaired);
+        assertEq(chainContractAddress.upgradeTransition(0), address(repaired), "the lower target is committed");
+        assertEq(
+            ICTMTransition(chainContractAddress.upgradeTransition(V32)).fromRelease(),
+            repaired.newRelease(),
+            "it lands on the onward edge's source"
+        );
+
+        _upgradeChain(repaired);
+        assertEq(IGetters(chainAddress).getProtocolVersion(), V32);
+        UtilsFacet(chainAddress).util_setL2SystemContractsUpgradeTxHash(bytes32(0));
+        _upgradeChain(transitionV33);
+        assertEq(IGetters(chainAddress).getProtocolVersion(), V33, "the chain still reaches the CTM's version");
     }
 
     /// @dev Nothing departs a version the CTM has not reached, so such a target has no onward

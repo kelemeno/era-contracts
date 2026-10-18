@@ -94,12 +94,8 @@ error SettlementLayerChainIdMismatch();
 error SettlementLayerCTMMismatch();
 // 0x97f58c80
 error TotalPriorityTxsIsZero();
-// 0x0c946faf
-error TransitionDeadlineMismatch(uint256 expected, uint256 actual);
 // 0x79274f04
 error UnsupportedProofMetadataVersion(uint256 metadataVersion);
-// 0x16bb1290
-error UpgradeTransitionUnchanged(address transition);
 // 0x52595598
 error ValL1DAWrongInputLength(uint256 inputLength, uint256 expectedLength);
 // 0x712d02d2

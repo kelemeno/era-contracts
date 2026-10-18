@@ -5,7 +5,6 @@ pragma solidity 0.8.28;
 import {Diamond} from "../libraries/Diamond.sol";
 import {ZKChainBase} from "./facets/ZKChainBase.sol";
 import {
-    L2_TO_L1_LOG_SERIALIZE_SIZE,
     DEFAULT_BATCH_OVERHEAD_L1_GAS,
     DEFAULT_MAX_PUBDATA_PER_BATCH,
     DEFAULT_MAX_L2_GAS_PER_BATCH,
@@ -22,7 +21,7 @@ import {ReleaseFacetReader} from "../../upgrades/registry/libraries/ReleaseFacet
 import {PriorityQueue} from "../libraries/PriorityQueue.sol";
 import {ChainBatchRootTree} from "../../common/libraries/ChainBatchRootTree.sol";
 import {PriorityTree} from "../libraries/PriorityTree.sol";
-import {EmptyAssetId, GenesisBatchHashZero, ZeroAddress} from "../../common/L1ContractErrors.sol";
+import {EmptyAssetId, ZeroAddress} from "../../common/L1ContractErrors.sol";
 import {L2_BRIDGEHUB_ADDR, L2_NATIVE_TOKEN_VAULT_ADDR} from "../../common/l2-helpers/L2ContractAddresses.sol";
 import {IL1AssetRouter} from "../../bridge/asset-router/IL1AssetRouter.sol";
 import {IBridgehubBase} from "../../core/bridgehub/IBridgehubBase.sol";
@@ -45,8 +44,9 @@ contract DiamondInit is ZKChainBase, IDiamondInit {
     ///      into this init, preserving the sender. Everything else — bridgehub, protocol
     ///      version, validator timelock, genesis batch hash, base token asset id, facet set and
     ///      verifier — is read from the CTM, its current release and the bridgehub.
-    /// @dev Every address and hash read from the CTM, the release, the bridgehub and the asset
-    ///      router is zero-checked (the permissionless validator on L1 only: priority mode is L1-only).
+    /// @dev Checks only what no earlier statement or install-time check already refuses: the admin,
+    ///      the validator timelock, the base token asset id, the native token vault and (on L1,
+    ///      where priority mode exists) the permissionless validator.
     /// @return Magic 32 bytes, which indicates that the contract logic is expected to be used as a diamond proxy
     /// initializer
     function initialize(uint256 _chainId, address _admin) public virtual reentrancyGuardInitializer returns (bytes32) {
@@ -64,9 +64,6 @@ contract DiamondInit is ZKChainBase, IDiamondInit {
         if (validatorTimelock == address(0)) {
             revert ZeroAddress();
         }
-        if (bridgehub == address(0)) {
-            revert ZeroAddress();
-        }
         if (baseTokenAssetId == bytes32(0)) {
             revert EmptyAssetId();
         }
@@ -74,12 +71,7 @@ contract DiamondInit is ZKChainBase, IDiamondInit {
         // Everything chain-independent is read from the current release the CTM pins — the
         // committed chain-creation cut carries no init payload. Facets are installed here, by the
         // init itself, from the release's facet rows and each facet's own self-description.
-        address currentRelease = ctm.currentRelease();
-        if (currentRelease == address(0)) {
-            revert ZeroAddress();
-        }
-        ICTMRelease release = ICTMRelease(currentRelease);
-        release.validate();
+        ICTMRelease release = ICTMRelease(ctm.currentRelease());
         Diamond.FacetCut[] memory facetCuts = ReleaseFacetReader.newChainInstallations(release);
         if (facetCuts.length != 0) {
             Diamond.diamondCut(
@@ -95,9 +87,6 @@ contract DiamondInit is ZKChainBase, IDiamondInit {
             s.nativeTokenVault = L2_NATIVE_TOKEN_VAULT_ADDR;
         } else {
             address assetRouter = address(IBridgehubBase(bridgehub).assetRouter());
-            if (assetRouter == address(0)) {
-                revert ZeroAddress();
-            }
             address nativeTokenVault = address(IL1AssetRouter(assetRouter).nativeTokenVault());
             if (nativeTokenVault == address(0)) {
                 revert ZeroAddress();
@@ -112,19 +101,11 @@ contract DiamondInit is ZKChainBase, IDiamondInit {
 
         // The verifier is part of the release's installed chain state, so it comes from the same
         // object as the facets and base-system hashes rather than from a separate CTM lookup.
-        address verifier = release.verifier();
-        if (verifier == address(0)) {
-            revert ZeroAddress();
-        }
-        s.verifier = IVerifier(verifier);
+        s.verifier = IVerifier(release.verifier());
         s.admin = _admin;
         s.validators[validatorTimelock] = true;
 
-        bytes32 storedBatchZero = ctm.storedBatchZero();
-        if (storedBatchZero == bytes32(0)) {
-            revert GenesisBatchHashZero();
-        }
-        s.storedBatchHashes[0] = storedBatchZero;
+        s.storedBatchHashes[0] = ctm.storedBatchZero();
         s.priorityTxMaxGasLimit = DEFAULT_PRIORITY_TX_MAX_GAS_LIMIT;
         s.priorityModeInfo.permissionlessValidator = permissionlessValidator;
         s.feeParams = FeeParams({
@@ -142,10 +123,6 @@ contract DiamondInit is ZKChainBase, IDiamondInit {
         // All new chains track the total supply of their base token. Legacy chains upgraded in place
         // are initialized through a separate upgrade path.
         s.baseTokenHasTotalSupply = true;
-
-        // While this does not provide a protection in the production, it is needed for local testing
-        // Length of the L2Log encoding should not be equal to the length of other L2Logs' tree nodes preimages
-        assert(L2_TO_L1_LOG_SERIALIZE_SIZE != 2 * 32);
 
         return Diamond.DIAMOND_INIT_SUCCESS_RETURN_VALUE;
     }

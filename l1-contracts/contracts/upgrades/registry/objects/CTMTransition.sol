@@ -11,7 +11,7 @@ import {TransitionDerivationLib} from "../libraries/TransitionDerivationLib.sol"
 import {L2PlanLib} from "../libraries/L2PlanLib.sol";
 import {VersionEdgeLib} from "../libraries/VersionEdgeLib.sol";
 import {Diamond} from "../../../state-transition/libraries/Diamond.sol";
-import {L1OnlyEdgeChangesL2State, ZeroAddress} from "../../../common/L1ContractErrors.sol";
+import {L1OnlyEdgeChangesL2State} from "../../../common/L1ContractErrors.sol";
 import {L2UpgradePlan, TransitionManifest, ReleaseDiff} from "../RegistryTypes.sol";
 import {IDefaultUpgrade} from "../../IDefaultUpgrade.sol";
 import {L2CanonicalTransaction} from "../../../common/Messaging.sol";
@@ -48,27 +48,15 @@ contract CTMTransition is ICTMTransition, ManifestStorage {
         // `fromRelease` is MANDATORY: every transition departs from a real, pinned release.
         // Bootstrapping a pre-registry CTM is one-time migration code, never an accommodation
         // here; see the Bootstrap section of {docs/registry-driven-upgrades.md}.
-        if (
-            _manifest.fromRelease == address(0) ||
-            _manifest.newRelease == address(0) ||
-            _manifest.upgradeEngine == address(0)
-        ) {
-            revert ZeroAddress();
-        }
         uint256 oldVersion = ICTMRelease(_manifest.fromRelease).protocolVersion();
         uint256 newVersion = ICTMRelease(_manifest.newRelease).protocolVersion();
         derivedOldProtocolVersion = oldVersion;
         derivedNewProtocolVersion = newVersion;
 
-        // The engine's code existence is checked by `validate()` on the execution paths, not
-        // here — see {ProxyUpgradeTransition}. Both release EDGES are validated, though: the
-        // delta below is derived from their manifests, so a malformed edge would silently
-        // produce a malformed cut.
-        // WHICH releases these are is governance's decision, established by review: the
-        // executor's release-edge check ties `fromRelease` to the CTM's live `currentRelease`,
-        // and `newRelease` is what the same commit then installs.
-        ICTMRelease(_manifest.newRelease).validate();
-        ICTMRelease(_manifest.fromRelease).validate();
+        // No code or release checks here: the CTM checks the code this transition names when it
+        // commits it, `fromRelease` must be the CTM's installed release, and the same commit
+        // installs `newRelease`, validating it — so a transition derived from a malformed release
+        // can be built but never committed.
 
         // The FINAL plan: the target release's table-derived set, then the authored delegate and
         // extras at their bytecode-derived addresses, with the factory dependencies of everything
@@ -216,13 +204,11 @@ contract CTMTransition is ICTMTransition, ManifestStorage {
     }
 
     /// @inheritdoc ICTMTransition
-    /// @dev THE enumeration of what this transition names itself: the upgrade engine and the
+    /// @dev THE enumeration of the code this transition names itself: the upgrade engine and the
     ///      delegate composer (version-specific CODE in place of authored calldata) when the plan
-    ///      names one. The two release edges are objects with check surfaces of their own.
+    ///      names one. The two releases are checked where they are installed.
     function validate() external view {
         TransitionManifest memory m = getManifest();
-        ICTMRelease(m.newRelease).validate();
-        ICTMRelease(m.fromRelease).validate();
         ObjectAnchorLib.requireCode(m.upgradeEngine);
         if (m.l2Plan.delegateComposer != address(0)) {
             ObjectAnchorLib.requireCode(m.l2Plan.delegateComposer);

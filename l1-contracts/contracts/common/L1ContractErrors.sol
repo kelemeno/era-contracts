@@ -57,20 +57,10 @@ error BatchHashMismatch(bytes32 expected, bytes32 actual);
 error BatchNumberMismatch(uint256 expectedBatchNumber, uint256 providedBatchNumber);
 // 0x41c329f7
 error BatchTimestampGreaterThanLastL2BlockTimestamp();
-// 0x63506488
-error BootstrapAlreadyExecuted();
-// 0x81ded943
-error BootstrapAuthorityNotHeld(address target, address actualOwner);
-// 0xb772460f
-error BootstrapExecutorNotBound(address executor, address expectedTarget, address actualTarget);
 // 0x00fcba27
 error BootstrapExecutorOwnerMismatch(address executor, address expectedOwner, address actualOwner);
 // 0x8a593161
 error BootstrapNominationPending(address target, address pendingOwner);
-// 0x447aee1e
-error BootstrapNotYetExecuted();
-// 0x24c8e294
-error BootstrapReleaseNotInstalled(address expected, address actual);
 // 0x5f5dd61c
 error BootstrapServerNotifierNotBound(address expected, address actual);
 // 0xdc145e4f
@@ -396,10 +386,6 @@ error QueueIsEmpty();
 error RecoverToL1NotSupported();
 // 0xab143c06
 error Reentrancy();
-// 0xcb530847
-error RegistryDuplicateFacetRow(address facet);
-// 0x3e28bae4
-error RegistryDuplicateProxyRow(address proxy);
 // 0x22345d26
 error RegistryDuplicateSelector(bytes4 selector);
 // 0xba5f0dd8
@@ -408,22 +394,18 @@ error RegistryEmptySelectors(address facet);
 error RegistryInventoryLengthMismatch(uint256 expected, uint256 actual);
 // 0xb40929f4
 error RegistryMemberHasNoFixedAddress(uint256 member);
-// 0xef72ee1a
-error RegistrySelfEdgeProxyRow(address proxy);
 // 0xe89c554c
 error RegistryTargetHasNoCode(address target);
-// 0x1f20dafa
-error RegistryUnknownKey();
 // 0xfad1d610
 error ReleaseForceDeploymentMismatch(uint256 member);
-// 0xc99ade52
-error ReleaseProtocolVersionMismatch(uint256 protocolVersion, uint256 releaseProtocolVersion);
 // 0x667d17de
 error RemoveFunctionFacetAddressNotZero(address facet);
 // 0xa2d4b16c
 error RemoveFunctionFacetAddressZero();
 // 0xf6fd7071
 error RemovingPermanentRestriction();
+// 0xffc0fd93
+error RenounceOwnershipDisabled();
 // 0x3580370c
 error ReplaceFunctionFacetAddressZero();
 // 0xf126e113
@@ -464,8 +446,6 @@ error TokenNotSupported(address token);
 error TokensWithFeesNotSupported();
 // 0x8e3ce3cb
 error TooHighDeploymentNonce();
-// 0x76da24b9
-error TooManyFactoryDeps();
 // 0xf0b4e88f
 error TooMuchGas();
 // 0x00c5a6a9
@@ -482,8 +462,6 @@ error TransitionReleaseMismatch(address expected, address actual);
 error UnallowedImplementation(bytes32 implementationHash);
 // 0x8e4a23d6
 error Unauthorized(address caller);
-// 0xe52478c7
-error UndefinedDiamondCutAction();
 // 0xe15dc31a
 error UnknownProofType(uint256 proofType);
 // 0xc352bb73

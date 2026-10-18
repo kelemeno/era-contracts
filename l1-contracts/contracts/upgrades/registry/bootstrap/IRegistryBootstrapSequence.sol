@@ -18,7 +18,7 @@ struct BootstrapAction {
 /// @author Matter Labs
 /// @custom:security-contact security@matterlabs.dev
 /// @notice The read surface of the bootstrap edge's call sequence: the ordered governance calls of
-///         its one bundle, ending in the edge's completion check.
+///         its one bundle, ending in the edge itself (`migrate()`).
 interface IRegistryBootstrapSequence {
     /// @notice The edge this sequence describes.
     function MIGRATION() external view returns (address);
@@ -27,7 +27,6 @@ interface IRegistryBootstrapSequence {
     function CORE_TRANSITION() external view returns (address);
 
     /// @notice The bootstrap bundle's calls, in execution order. Governance executes them as one
-    ///         bundle, so any failing call — the closing completion check included — reverts the
-    ///         whole edge.
+    ///         bundle, so any failing call reverts the whole edge.
     function actions() external view returns (BootstrapAction[] memory);
 }

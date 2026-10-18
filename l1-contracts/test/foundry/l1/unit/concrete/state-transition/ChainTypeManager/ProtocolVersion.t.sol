@@ -3,7 +3,6 @@ pragma solidity 0.8.28;
 
 import {ChainTypeManagerTest} from "./_ChainTypeManager_Shared.t.sol";
 import {Diamond} from "contracts/state-transition/libraries/Diamond.sol";
-import {NoCommittedUpgradeCutForVersion} from "contracts/common/L1ContractErrors.sol";
 import {SemVer} from "contracts/common/libraries/SemVer.sol";
 import {IChainTypeManager} from "contracts/state-transition/IChainTypeManager.sol";
 
@@ -149,9 +148,10 @@ contract ProtocolVersion is ChainTypeManagerTest {
         );
 
         // The edge above was committed via the legacy cut-taking setter, which registers no
-        // transition — and a v32 chain derives its cut from the committed transition, so the
-        // read fails before the chain's own version check would.
-        vm.expectRevert(abi.encodeWithSelector(NoCommittedUpgradeCutForVersion.selector, 0));
+        // transition — and a registry-era chain derives its cut from the committed transition, so
+        // the read fails (without data: there is no transition to read the cut off) before the
+        // chain's own version check would.
+        vm.expectRevert(bytes(""));
         chainContractAddress.upgradeChainFromVersion(chainId, 0);
     }
 }

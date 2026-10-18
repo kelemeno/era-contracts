@@ -236,17 +236,18 @@ it is the executor legs — `CoreUpgradeExecutor.applyL1Upgrade`,
 its object exists, in that order — plus the declared external actions (the merger's PUH wiring and
 CTM `acceptOwnership` normalization, and whatever calls the release declared); on the v35
 bootstrap edge it is the run the `RegistryBootstrapSequence` derives, ending with
-`RegistryBootstrapMigration.validateApplied()`.
+`RegistryBootstrapMigration.migrate()`.
 
 The bundle is one atomic transaction: the legs apply the ecosystem proxy rows, then the CTM-domain
 rows, then `setNewVersionUpgradeFromTransition` (which commits the transition and installs the
-target release as the CTM's `currentRelease`), each verifying what it applied; any failure reverts
-the whole proposal. There are no stages and no delay between parts, and chain migrations are not
-paused around it ([migration pauses are incident control](../docs/upgrade-operations.md#migration-pauses-are-incident-control)).
+target release as the CTM's `currentRelease`); any failure reverts the whole proposal. There are no
+stages and no delay between parts, and chain migrations are not paused around it
+([migration pauses are incident control](../docs/upgrade-operations.md#migration-pauses-are-incident-control)).
 The semantics are specified in
 [Ecosystem upgrade coordination](./ecosystem-upgrade-coordination.md#execution).
-`ecosystem upgrade-governance` replays the bundle on a fork as governance and emits it as one Safe
-bundle; the simulator scenario is the other rehearsal.
+`ecosystem upgrade-governance` replays the bundle on a fork as governance, fails unless the fork is
+left in the state the package describes ([Where each check lives](#where-each-check-lives)), and
+emits the bundle as one Safe bundle; the simulator scenario is the other rehearsal.
 
 How the calls are executed depends on the governance:
 
@@ -329,6 +330,34 @@ upgrades, and anyone may cross it with `CTMUpgradeExecutor.upgradeChain`. The co
 (`ecosystem.toml`, `transactions.txt`, the scenarios, the per-chain bundles) stay in the release's
 `output/<env>/` directory as the record of the rollout, and `permanent-values/<env>.toml` is updated
 with any address the release moved.
+
+## Where each check lives
+
+A proposal executes days after its package was reviewed, and in between, state that governance
+does not control can move. Each check of an upgrade therefore lives in one place, chosen by what it
+reads:
+
+| Where                          | What it checks                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The contracts, live state      | State at execution that can change after review, by governance or by someone else (the CTM admin, a ChainAdmin, validators, the permissionless `migrate` / `upgradeChain` caller): proxy implementations; the CTM's `currentRelease`, `protocolVersion` and `upgradeTransition`; bytecode publication; `serverNotifierAddress` and the notifier's CTM; each chain's batch counters, routing and fee params |
+| The contracts, write-once      | Cheap construction invariants whose failure cannot be undone: the `VersionEdgeLib` edge rules; a zero verifier or genesis batch hash, an empty facet set or a wrong L2 table length in a release; an ownerless executor (a zero initial owner; `renounceOwnership` reverts); code at every address bound into a release or transition when it is installed or committed                                    |
+| protocol-ops, before the vote  | The review-time facts (`verify-package`): code identity, CREATE2 provenance, immutables by value (code identity masks them), the manifest contents (zero row fields, self-edges, duplicate proxies, empty inventories), executor bindings, bundle order, the arriving release's `validate()` by `eth_call`, and bytecode publication as an early readiness check                                           |
+| protocol-ops, after the replay | The post-state `ecosystem upgrade-governance` finds on its fork: the CTM's version, release and committed transition, who holds the CTM domain and the notifier, the executors' owners, every row's proxy at its `implNew`                                                                                                                                                                                 |
+| Tests                          | That the reviewed code is right, including its post-conditions within one transaction: the Foundry tests and the Anvil runners assert them, and the contracts never re-check them                                                                                                                                                                                                                          |
+
+Three rules keep each check in one place:
+
+- **A write-once object checks its own shape once.** A release's `validate()` runs when
+  `ChainTypeManager._setCurrentRelease` installs it, and nothing downstream re-checks the release.
+  It depends only on the code at the addresses it names, so its `eth_call` before the vote predicts
+  the install.
+- **A live check lives in the contract that owns the state.** The CTM, not an executor wrapper,
+  checks a commit and a replacement, so a call sent through `forward` gets the same checks.
+- **A check is deleted when the next statement already reverts on every path**: decoding empty
+  return data, the code-size check of a call that returns nothing, OpenZeppelin ERC1967's
+  `isContract`, `onlyOwner`. Only the error name is lost.
+
+A check moves off chain only once protocol-ops performs it.
 
 ## Authoring a release
 

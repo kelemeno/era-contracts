@@ -14,10 +14,9 @@ import {RegistryTargetHasNoCode} from "../../../common/L1ContractErrors.sol";
 ///      {docs/registry-driven-upgrades.md}.
 library ObjectAnchorLib {
     /// @notice Reverts unless `_target` is a deployed contract.
-    /// @dev Not defensive bookkeeping: a call to a codeless address SUCCEEDS silently, and a
-    ///      codeless delegatecall target turns a chain's upgrade into a no-op that reports
-    ///      success. This is an execution precondition, and it stays on every path that commits
-    ///      or applies an object.
+    /// @dev Used where an address is BOUND into a release or transition (install, commit): code
+    ///      placed at an empty address later (an EIP-7702 delegation, a later CREATE2) would run
+    ///      on every chain, so only code that already exists may be bound.
     function requireCode(address _target) internal view {
         if (_target.code.length == 0) {
             revert RegistryTargetHasNoCode(_target);
