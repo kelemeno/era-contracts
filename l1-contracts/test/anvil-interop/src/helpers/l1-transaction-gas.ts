@@ -1,21 +1,7 @@
 import { ethers } from "ethers";
-import { ETHEREUM_L1_TX_GAS_LIMIT } from "../core/const";
-
-/**
- * The L1 gas rules the harness runs under, from `L1_GAS_RULES`. The default, "osaka", sends and asserts every L1
- * tx within EIP-7825's cap. "amsterdam" is a measurement mode for an Amsterdam L1 anvil (`ANVIL_BIN`): there
- * EIP-8037 state gas lets `tx.gas` exceed the cap, so txs declare their estimate and the cap is checked post hoc
- * on the execution-gas part.
- */
-export const L1_GAS_RULES: "osaka" | "amsterdam" = readL1GasRules();
-
-function readL1GasRules(): "osaka" | "amsterdam" {
-  const rules = process.env.L1_GAS_RULES?.trim() || "osaka";
-  if (rules !== "osaka" && rules !== "amsterdam") {
-    throw new Error(`L1_GAS_RULES must be "osaka" or "amsterdam", got "${rules}"`);
-  }
-  return rules;
-}
+import { ETHEREUM_L1_TX_GAS_LIMIT, REFUND_COUNTER_TRACER } from "../core/const";
+import type { CallFrame, GlamsterdamGas, PrestateDiff } from "../core/glamsterdam-gas";
+import { L1_GAS_RULES, glamsterdamGas, glamsterdamGasViolations, maxCallDepth } from "../core/glamsterdam-gas";
 
 /** Gas overrides for an L1 tx: `osakaGasLimit` under "osaka", ethers' own estimate under "amsterdam". */
 export function l1GasOverrides(osakaGasLimit: ethers.BigNumberish): { gasLimit?: ethers.BigNumberish } {
@@ -37,12 +23,16 @@ export type L1TransactionGasRecord = L1TransactionGasContext & {
 
 type GasReceipt = Pick<ethers.providers.TransactionReceipt, "status" | "transactionHash" | "gasUsed">;
 
+function gasLabel(context: L1TransactionGasContext): string {
+  return `${context.phase} ${context.bundle} tx ${context.index} (to ${context.target})`;
+}
+
 export function checkL1TransactionGas(
   receipt: GasReceipt,
   gasLimit: ethers.BigNumberish,
   context: L1TransactionGasContext
 ): L1TransactionGasRecord {
-  const label = `${context.phase} ${context.bundle} tx ${context.index} (to ${context.target})`;
+  const label = gasLabel(context);
   if (receipt.status !== 1) {
     throw new Error(`${label}: transaction ${receipt.transactionHash} did not succeed`);
   }
@@ -61,11 +51,51 @@ export function checkL1TransactionGas(
   };
 }
 
-export function recordL1TransactionGas(
-  receipt: GasReceipt,
+async function measureGlamsterdamGas(
+  provider: ethers.providers.JsonRpcProvider,
+  receipt: ethers.providers.TransactionReceipt
+): Promise<GlamsterdamGas> {
+  const hash = receipt.transactionHash;
+  const tx = await provider.send("eth_getTransactionByHash", [hash]);
+  const block = await provider.send("eth_getBlockByNumber", [ethers.utils.hexValue(receipt.blockNumber), false]);
+  const diff: PrestateDiff = await provider.send("debug_traceTransaction", [
+    hash,
+    { tracer: "prestateTracer", tracerConfig: { diffMode: true } },
+  ]);
+  const refundCounter = Number(
+    (await provider.send("debug_traceTransaction", [hash, { tracer: REFUND_COUNTER_TRACER }])) ?? 0
+  );
+  const calls: CallFrame = await provider.send("debug_traceTransaction", [hash, { tracer: "callTracer" }]);
+  return glamsterdamGas({
+    diff,
+    miner: block.miner ?? "",
+    blockGasLimit: ethers.BigNumber.from(block.gasLimit).toNumber(),
+    gasUsed: receipt.gasUsed.toNumber(),
+    refundCounter,
+    callDepth: maxCallDepth(calls),
+    tx: { from: tx.from, to: tx.to, value: tx.value, data: tx.input },
+  });
+}
+
+/**
+ * Check and log one L1 transaction (`L1 transaction gas: {json}`). Under "amsterdam" the record also carries the
+ * transaction's Glamsterdam gas split, read from the node, and fails when it breaks a Glamsterdam limit.
+ */
+export async function recordL1TransactionGas(
+  provider: ethers.providers.JsonRpcProvider,
+  receipt: ethers.providers.TransactionReceipt,
   gasLimit: ethers.BigNumberish,
   context: L1TransactionGasContext
-): void {
+): Promise<void> {
   const record = checkL1TransactionGas(receipt, gasLimit, context);
-  console.log(`  L1 transaction gas: ${JSON.stringify(record)}`);
+  if (L1_GAS_RULES === "osaka") {
+    console.log(`  L1 transaction gas: ${JSON.stringify(record)}`);
+    return;
+  }
+  const gas = await measureGlamsterdamGas(provider, receipt);
+  console.log(`  L1 transaction gas: ${JSON.stringify({ ...record, ...gas })}`);
+  const violations = glamsterdamGasViolations(gas);
+  if (violations.length > 0) {
+    throw new Error(`${gasLabel(context)}: ${violations.join("; ")} (transaction ${receipt.transactionHash})`);
+  }
 }

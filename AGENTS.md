@@ -341,6 +341,9 @@ regenerate whatever it invalidates. A bump changes solc metadata in every artifa
 and unaffected — measured, not assumed). Anvil's trace schema must stay compatible with the
 committed anvil-interop chain states; regenerate those too if a bump changes it.
 
+One anvil is pinned separately: [`.github/amsterdam-anvil.env`](.github/amsterdam-anvil.env), for
+the L1 of the Glamsterdam gas check only. Its header says what it covers and when to bump it.
+
 ### Building Artifacts
 
 Before running tests, build the artifacts from the repository root:

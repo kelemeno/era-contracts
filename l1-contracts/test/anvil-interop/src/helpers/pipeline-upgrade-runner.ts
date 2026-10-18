@@ -621,7 +621,7 @@ async function runRecurringHop(
       await impersonateAndRun(l1Provider, admin, async (signer) => {
         await sendAndCheck(
           l1Provider,
-          signer.sendTransaction({ to: chain.diamondProxy, data, gasLimit: 10_000_000 }),
+          signer.sendTransaction({ to: chain.diamondProxy, data, ...l1GasOverrides(10_000_000) }),
           `chain ${chain.chainId}: upgradeChainFromVersion(${oldVersion.toHexString()})`
         );
       });
@@ -779,7 +779,7 @@ async function sendAndCheck(
     const trace = await traceFailedTx(provider, receipt.transactionHash);
     throw new Error(`${label} reverted:\n${trace}`);
   }
-  recordL1TransactionGas(receipt, tx.gasLimit, {
+  await recordL1TransactionGas(provider, receipt, tx.gasLimit, {
     phase: "chain-upgrade",
     bundle: label,
     index: 1,
@@ -1021,7 +1021,7 @@ async function executeSafeBundles(outDir: string, rpcUrl: string, phase: "prepar
             `Safe bundle ${path.basename(bundle.file)} tx ${i + 1}/${transactions.length} reverted:\n${trace}`
           );
         }
-        recordL1TransactionGas(receipt, tx.gasLimit, {
+        await recordL1TransactionGas(provider, receipt, tx.gasLimit, {
           phase,
           bundle: path.basename(bundle.file),
           index: i + 1,

@@ -85,12 +85,28 @@ limit and logs its phase, bundle, index, target, hash and gas usage. Per-chain L
 are checked and logged too. These calls impersonate the bundle signer: the measurements exclude
 the outer Safe/governance envelope.
 
-To measure under Glamsterdam's gas schedule instead, set `L1_GAS_RULES=amsterdam` and point
-`ANVIL_BIN` at a wrapper that starts the L1 (chain 31337) with a Foundry build supporting
-`--hardfork amsterdam` and a mainnet-like `--gas-limit`, and the L2s as usual. EIP-8037 state gas
-lets a deploy's `tx.gas` exceed 2^24, so each L1 transaction then declares its estimate and the
-cap checks are skipped; anvil's receipts do not split execution from state gas, so derive the split
-from each transaction's state diff (`ANVIL_INTEROP_KEEP_CHAINS=1` keeps the L1 to read it from).
+`L1_GAS_RULES=amsterdam` runs the same test under Glamsterdam's gas schedule, as CI's
+`upgrade-test-glamsterdam` job does. It needs `ANVIL_AMSTERDAM_BIN`, the anvil pinned in
+`.github/amsterdam-anvil.env`:
+
+```bash
+ANVIL_AMSTERDAM_BIN="$(scripts/install-amsterdam-anvil.sh "$HOME/.cache/anvil-amsterdam")" \
+  ANVIL_BIN="$HOME/.foundry/versions/v1.5.1/anvil" L1_GAS_RULES=amsterdam yarn test:upgrade
+```
+
+The L1 then runs `--hardfork amsterdam` at mainnet's 60M block gas limit, loaded from a copy of the
+fixture without its block history, which that build cannot parse. The L2s keep `ANVIL_BIN`;
+protocol-ops' forks use the `anvil` on `PATH` (v1.5.1 in CI). A canary first fails the run unless
+the binary's estimates for a few probe transactions match EIP-2780, EIP-7976, EIP-8037 and EIP-8038.
+EIP-8037 state gas lets a deploy's `tx.gas` exceed 2^24, so each L1 transaction declares its estimate.
+
+Anvil runs one gas pool where Glamsterdam splits execution gas from a state gas reservoir, so every
+recorded transaction is read back from the node (prestate diff, refund counter, call tree) and
+logged with its state, execution, intrinsic and floor gas and its call depth. The run fails when the
+larger of intrinsic and floor gas exceeds 2^24, or when the execution gas does not fit what
+Glamsterdam guarantees the transaction's deepest frame: 2^24 less the intrinsic gas, less a 64th per
+call level, as if all of it ran there. When `floorBinding` is set, the receipt reports the calldata
+floor, so the logged execution gas is only an upper bound.
 
 A fresh deployment is born into the registry-driven model: `DeployL1CoreContracts` gives the
 ecosystem ProxyAdmin to the `CoreUpgradeExecutor`, and `DeployCTM` gives the CTM, its own ProxyAdmin and
