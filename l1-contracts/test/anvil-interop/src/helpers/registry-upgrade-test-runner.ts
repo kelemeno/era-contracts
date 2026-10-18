@@ -67,6 +67,7 @@ import {
   transitionInitArgs,
 } from "./registry-manifest";
 import { assertServerNotifierState } from "./bootstrap-upgrade-stage";
+import { l1GasOverrides } from "./l1-transaction-gas";
 import type { ExpectedCall, UpgradeLeg } from "./governance-bundle";
 import type { ChainRole } from "../core/types";
 import {
@@ -424,7 +425,7 @@ export async function runRegistryDrivenUpgradeScenario(scenario: RegistryUpgrade
       await sendAsOwner(
         l1Provider,
         ctmExecutor,
-        (c) => c.upgradeChain(objects.transition, chain.chainId, { gasLimit: DEFAULT_GAS_LIMIT }),
+        (c) => c.upgradeChain(objects.transition, chain.chainId, l1GasOverrides(DEFAULT_GAS_LIMIT)),
         `ctmExecutor.upgradeChain(transition) for chain ${chain.chainId}`
       );
       console.log(`  ✓ chain ${chain.chainId} upgraded`);
@@ -744,14 +745,18 @@ async function executeGovernanceBundle(
     const connected = governance.connect(signer);
     await sendAndCheck(
       l1Provider,
-      connected.scheduleTransparent(operation, delay, { gasLimit: DEFAULT_GAS_LIMIT }),
+      connected.scheduleTransparent(operation, delay, l1GasOverrides(DEFAULT_GAS_LIMIT)),
       `${label}: Governance.scheduleTransparent`
     );
     if (!delay.isZero()) {
       await l1Provider.send("evm_increaseTime", [delay.toNumber()]);
       await l1Provider.send("evm_mine", []);
     }
-    const execute = connected.execute(operation, { gasLimit: DEFAULT_GAS_LIMIT });
+    // A tx expected to revert cannot be estimated, so it keeps the fixed limit under either gas rules.
+    const execute = connected.execute(
+      operation,
+      expectRevert ? { gasLimit: DEFAULT_GAS_LIMIT } : l1GasOverrides(DEFAULT_GAS_LIMIT)
+    );
     if (!expectRevert) {
       return sendAndCheck(l1Provider, execute, `${label}: Governance.execute`);
     }

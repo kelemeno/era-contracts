@@ -83,7 +83,14 @@ production rotates its salt per release, so the recurring hop's `L1MessageRoot` 
 The pipeline caps each replayed L1 prepare/governance transaction at EIP-7825's 16,777,216 gas
 limit and logs its phase, bundle, index, target, hash and gas usage. Per-chain L1 upgrade calls
 are checked and logged too. These calls impersonate the bundle signer: the measurements exclude
-the outer Safe/governance envelope and do not validate Glamsterdam's future gas schedule.
+the outer Safe/governance envelope.
+
+To measure under Glamsterdam's gas schedule instead, set `L1_GAS_RULES=amsterdam` and point
+`ANVIL_BIN` at a wrapper that starts the L1 (chain 31337) with a Foundry build supporting
+`--hardfork amsterdam` and a mainnet-like `--gas-limit`, and the L2s as usual. EIP-8037 state gas
+lets a deploy's `tx.gas` exceed 2^24, so each L1 transaction then declares its estimate and the
+cap checks are skipped; anvil's receipts do not split execution from state gas, so derive the split
+from each transaction's state diff (`ANVIL_INTEROP_KEEP_CHAINS=1` keeps the L1 to read it from).
 
 A fresh deployment is born into the registry-driven model: `DeployL1CoreContracts` gives the
 ecosystem ProxyAdmin to the `CoreUpgradeExecutor`, and `DeployCTM` gives the CTM, its own ProxyAdmin and

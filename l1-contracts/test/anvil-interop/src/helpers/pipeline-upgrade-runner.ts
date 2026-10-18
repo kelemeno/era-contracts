@@ -94,7 +94,7 @@ import {
 } from "./bootstrap-upgrade-stage";
 import type { GovernanceCall, MergedGovernanceOutput } from "./governance-bundle";
 import { assertBundleIs, assertRegistryHopBundle, upgradeLegsOf } from "./governance-bundle";
-import { recordL1TransactionGas } from "./l1-transaction-gas";
+import { l1GasOverrides, recordL1TransactionGas } from "./l1-transaction-gas";
 import { createProvider, impersonateAndRun } from "../core/utils";
 import { runtimeConfig } from "../core/runtime-config";
 import type { ChainRole } from "../core/types";
@@ -1012,7 +1012,7 @@ async function executeSafeBundles(outDir: string, rpcUrl: string, phase: "prepar
           to: transactions[i].to,
           value: ethers.BigNumber.from(transactions[i].value),
           data: transactions[i].data,
-          gasLimit: ETHEREUM_L1_TX_GAS_LIMIT,
+          ...l1GasOverrides(ETHEREUM_L1_TX_GAS_LIMIT),
         });
         const receipt = await tx.wait();
         if (receipt.status !== 1) {

@@ -19,6 +19,7 @@ import { getAbi } from "../core/contracts";
 import { impersonateAndRun } from "../core/utils";
 import type { ExpectedCall, GovernanceCall, MergedGovernanceOutput } from "./governance-bundle";
 import { assertBundleIs, governanceCallsOf } from "./governance-bundle";
+import { l1GasOverrides } from "./l1-transaction-gas";
 import { proxyUpgradeDomain, proxyUpgradeSlotIndex } from "./registry-manifest";
 import {
   assertCtmDomainHeldBy,
@@ -76,7 +77,7 @@ export async function installLegacyFacet(
     for (const chain of chains) {
       await sendAndCheck(
         l1Provider,
-        ctm.connect(signer).executeUpgrade(chain.chainId, addCut, { gasLimit: DEFAULT_GAS_LIMIT }),
+        ctm.connect(signer).executeUpgrade(chain.chainId, addCut, l1GasOverrides(DEFAULT_GAS_LIMIT)),
         `install legacy facet on chain ${chain.chainId}`
       );
     }
@@ -376,7 +377,7 @@ export async function crossBootstrapEdgeOnChains(
     await impersonateAndRun(l1Provider, admin, async (signer) => {
       await sendAndCheck(
         l1Provider,
-        signer.sendTransaction({ to: chain.diamondProxy, data, gasLimit: DEFAULT_GAS_LIMIT }),
+        signer.sendTransaction({ to: chain.diamondProxy, data, ...l1GasOverrides(DEFAULT_GAS_LIMIT) }),
         `chain ${chain.chainId}: legacy upgradeChainFromVersion(handed cut)`
       );
     });

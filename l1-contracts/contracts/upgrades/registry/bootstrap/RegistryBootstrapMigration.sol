@@ -19,7 +19,7 @@ import {VersionEdgeLib} from "../libraries/VersionEdgeLib.sol";
 import {IRegistryBootstrapMigration} from "./IRegistryBootstrapMigration.sol";
 import {L2CanonicalTransaction} from "../../../common/Messaging.sol";
 import {BootstrapServerNotifierRowMissing, ZeroAddress} from "../../../common/L1ContractErrors.sol";
-import {BootstrapManifest, L2UpgradePlan} from "../RegistryTypes.sol";
+import {AuthoredL2Plan, BootstrapManifest, L2UpgradePlan} from "../RegistryTypes.sol";
 import {Diamond} from "../../../state-transition/libraries/Diamond.sol";
 import {CTMUpgradeComposer} from "../libraries/CTMUpgradeComposer.sol";
 import {TransitionDerivationLib} from "../libraries/TransitionDerivationLib.sol";
@@ -45,10 +45,6 @@ contract RegistryBootstrapMigration is IRegistryBootstrapMigration, ManifestStor
     ///         the CTM it would commit on.
     bool public executed;
 
-    /// @dev The FINAL L2 plan, constructed at construction and stored as its ABI encoding (see
-    ///      {CTMTransition} for why).
-    bytes internal encodedL2Plan;
-
     /// @dev The genesis release's version, read at construction (see {newProtocolVersion}).
     uint256 internal derivedNewProtocolVersion;
 
@@ -64,19 +60,10 @@ contract RegistryBootstrapMigration is IRegistryBootstrapMigration, ManifestStor
         if (_manifest.ctmProxyUpgrades[uint256(CTMContract.ServerNotifier)].implNew == address(0)) {
             revert BootstrapServerNotifierRowMissing();
         }
-        // The L2 leg, exactly as a transition constructs it: the genesis release's table (the target
-        // state, installed in full — there is no departing release to diff against) plus the
-        // authored delegate and extras, with the same shape rules ({L2PlanLib.build}).
         ICTMRelease release = ICTMRelease(_manifest.currentRelease);
         uint256 newVersion = release.protocolVersion();
         derivedNewProtocolVersion = newVersion;
-        L2UpgradePlan memory plan = L2PlanLib.build(
-            TransitionDerivationLib.deriveL2DeploymentsFromTable(
-                release.l2BytecodeInfos(),
-                release.l2SystemProxyBytecodeInfo()
-            ),
-            _manifest.l2Plan
-        );
+        L2UpgradePlan memory plan = _buildL2Plan(release, _manifest.l2Plan);
         // Held to the edge rules of a `CTMTransition`: chains cross this edge through the same
         // per-chain version checks, so an edge they would refuse must not be committable.
         VersionEdgeLib.requireValidEdge({
@@ -86,7 +73,6 @@ contract RegistryBootstrapMigration is IRegistryBootstrapMigration, ManifestStor
             _upgradeTimestamp: _manifest.upgradeTimestamp,
             _hasL2Side: plan.deployments.length != 0
         });
-        encodedL2Plan = abi.encode(plan);
     }
 
     /// @inheritdoc IRegistryBootstrapMigration
@@ -108,10 +94,12 @@ contract RegistryBootstrapMigration is IRegistryBootstrapMigration, ManifestStor
     }
 
     /// @inheritdoc ICommittedUpgrade
-    /// @dev The stored derived-plus-extra deployments with the authored delegate leg and factory
-    ///      dependencies.
+    /// @dev Rebuilt on every read rather than stored: it is a pure function of the write-once
+    ///      genesis release and the pinned manifest, and storing the full table's plan does not fit
+    ///      a 60M block under Glamsterdam's state-gas pricing.
     function l2Plan() public view returns (L2UpgradePlan memory) {
-        return abi.decode(encodedL2Plan, (L2UpgradePlan));
+        BootstrapManifest memory m = getManifest();
+        return _buildL2Plan(ICTMRelease(m.currentRelease), m.l2Plan);
     }
 
     /// @inheritdoc IRegistryBootstrapMigration
@@ -157,6 +145,27 @@ contract RegistryBootstrapMigration is IRegistryBootstrapMigration, ManifestStor
             BytecodesSupplier(IChainTypeManager(m.ctm).L1_BYTECODES_SUPPLIER()),
             l2Plan().factoryDepHashes
         );
+    }
+
+    /// @notice The edge's L2 leg, exactly as a transition constructs it: the genesis release's
+    ///         table (the target state, installed in full; there is no departing release to diff
+    ///         against) plus the authored delegate and extras, with the same shape rules
+    ///         ({L2PlanLib.build}).
+    /// @param _release The genesis release.
+    /// @param _authored The manifest's authored L2 input.
+    /// @return The final L2 plan.
+    function _buildL2Plan(
+        ICTMRelease _release,
+        AuthoredL2Plan memory _authored
+    ) private view returns (L2UpgradePlan memory) {
+        return
+            L2PlanLib.build(
+                TransitionDerivationLib.deriveL2DeploymentsFromTable(
+                    _release.l2BytecodeInfos(),
+                    _release.l2SystemProxyBytecodeInfo()
+                ),
+                _authored
+            );
     }
 
     /// @param _m The manifest.

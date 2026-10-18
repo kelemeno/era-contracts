@@ -137,7 +137,10 @@ checks and deliberately does not is in
 
 ## 5. Deployer broadcast
 
-Execute the deployer bundles through the Safe UI, or replay them under the EOA keys:
+Replay the deployer bundles under the EOA keys, one transaction per call. Do not send a deployer
+bundle as one Safe UI batch: its deploys together exceed EIP-7825's 2^24 per-transaction cap, and
+after Glamsterdam single deploys exceed it on their own (their state gas is outside the cap), which
+`upgrade-broadcast` accounts for:
 
 ```sh
 cargo run -p protocol_ops -- ecosystem upgrade-broadcast --manifest <out>/manifest.json --l1-rpc-url <rpc> --key 0x<addr>=0x<key>
