@@ -5,6 +5,7 @@ pragma solidity 0.8.28;
 import {ChainTypeManagerTest} from "../../state-transition/ChainTypeManager/_ChainTypeManager_Shared.t.sol";
 import {UtilsFacet} from "../../Utils/UtilsFacet.sol";
 
+import {Ownable} from "@openzeppelin/contracts-v4/access/Ownable.sol";
 import {ProxyAdmin} from "@openzeppelin/contracts-v4/proxy/transparent/ProxyAdmin.sol";
 import {Call} from "contracts/governance/Common.sol";
 import {IUpgradeExecutorBase} from "contracts/governance/IUpgradeExecutorBase.sol";
@@ -30,6 +31,7 @@ import {RegistryPostState} from "./RegistryPostState.sol";
 
 import {Diamond} from "contracts/state-transition/libraries/Diamond.sol";
 import {IChainTypeManager} from "contracts/state-transition/IChainTypeManager.sol";
+import {OutdatedProtocolVersion} from "contracts/state-transition/L1StateTransitionErrors.sol";
 import {IAdmin} from "contracts/state-transition/chain-interfaces/IAdmin.sol";
 import {IExecutor} from "contracts/state-transition/chain-interfaces/IExecutor.sol";
 import {IGetters} from "contracts/state-transition/chain-interfaces/IGetters.sol";
@@ -39,7 +41,7 @@ import {
     L2BytecodeNotPublished,
     TransitionNotCommitted,
     TransitionReleaseMismatch,
-    UpgradeNotPermissionlessYet
+    Unauthorized
 } from "contracts/common/L1ContractErrors.sol";
 import {
     GenesisFacet,
@@ -331,18 +333,56 @@ contract CTMUpgradeExecutorTest is CTMUpgradeExecutorFixture {
         ctmExecutor.forward(calls);
     }
 
-    /// @dev `acceptCTMOwnership` is deliberately permissionless: it can only ever COMPLETE a
-    ///      transfer already initiated toward this executor — Ownable2Step's pending-owner edge
-    ///      is the real gate, so a caller restriction adds nothing.
-    function test_acceptCTMOwnershipPermissionlessButGatedByNomination() public {
-        // Without a pending nomination, any caller just hits the Ownable2Step edge.
-        vm.prank(makeAddr("stranger"));
+    /// @dev Only the executor's owner or the CTM's current owner may complete a pending
+    ///      nomination; a stranger must not choose when the handover lands.
+    function test_revertWhen_strangerAcceptsCTMOwnership() public {
+        // Without a pending nomination, even the executor's owner hits the Ownable2Step edge.
+        vm.prank(governor);
         vm.expectRevert("Ownable2Step: caller is not the new owner");
         ctmExecutor.acceptCTMOwnership();
 
-        // The owner hands the CTM back to itself through the escape hatch and nominates the
-        // executor again; a stranger may then complete the handover — the accept only ever lands
-        // on the executor.
+        _giveTheCTMBackAndRenominateTheExecutor();
+
+        address stranger = makeAddr("stranger");
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(Unauthorized.selector, stranger));
+        ctmExecutor.acceptCTMOwnership();
+        assertEq(chainContractAddress.owner(), governor, "the CTM stays with its owner");
+        assertEq(chainContractAddress.pendingOwner(), address(ctmExecutor), "the nomination stays pending");
+    }
+
+    function test_acceptCTMOwnership_byExecutorOwner() public {
+        _giveTheCTMBackAndRenominateTheExecutor();
+
+        vm.expectEmit(true, true, false, false, address(chainContractAddress));
+        emit Ownable.OwnershipTransferred(governor, address(ctmExecutor));
+        vm.prank(governor);
+        ctmExecutor.acceptCTMOwnership();
+        assertEq(chainContractAddress.owner(), address(ctmExecutor), "accept must land ownership on the executor");
+        assertEq(chainContractAddress.pendingOwner(), address(0), "no pending owner may survive the accept");
+    }
+
+    /// @dev The path `RegistryBootstrapMigration.migrate()` takes: the CTM's owner, which does not
+    ///      own the executor, completes its own nomination.
+    function test_acceptCTMOwnership_byNominatingCTMOwner() public {
+        _giveTheCTMBackAndRenominateTheExecutor();
+        address executorOwner = makeAddr("executorOwner");
+        CTMUpgradeExecutor otherExecutor = new CTMUpgradeExecutor(
+            executorOwner,
+            IChainTypeManager(address(chainContractAddress)),
+            ctmProxyAdmin
+        );
+        vm.prank(governor);
+        chainContractAddress.transferOwnership(address(otherExecutor));
+
+        vm.prank(governor);
+        otherExecutor.acceptCTMOwnership();
+        assertEq(chainContractAddress.owner(), address(otherExecutor), "accept must land ownership on the executor");
+        assertEq(chainContractAddress.pendingOwner(), address(0), "no pending owner may survive the accept");
+    }
+
+    /// @dev Hands the CTM back to `governor` through `forward` and nominates `ctmExecutor` again.
+    function _giveTheCTMBackAndRenominateTheExecutor() internal {
         Call[] memory giveBack = new Call[](1);
         giveBack[0] = Call({
             target: address(chainContractAddress),
@@ -355,11 +395,6 @@ contract CTMUpgradeExecutorTest is CTMUpgradeExecutorFixture {
         chainContractAddress.acceptOwnership();
         vm.prank(governor);
         chainContractAddress.transferOwnership(address(ctmExecutor));
-
-        vm.prank(makeAddr("stranger"));
-        ctmExecutor.acceptCTMOwnership();
-        assertEq(chainContractAddress.owner(), address(ctmExecutor), "accept must land ownership on the executor");
-        assertEq(chainContractAddress.pendingOwner(), address(0), "no pending owner may survive the accept");
     }
 
     // The transition pins the deadline its edge was approved with (1000 in this fixture), but the
@@ -596,13 +631,38 @@ contract CTMUpgradeExecutorTest is CTMUpgradeExecutorFixture {
     }
 
     // ─────────────────────────── post-state ───────────────────────────
-    // The commit's post-conditions are not re-checked on chain: they are asserted here, by the
-    // anvil runners and by protocol-ops after a replay (`RegistryPostState`).
+    // `applyCTMUpgrade` re-reads its own commit; the full post-state is asserted here, by the anvil
+    // runners and by protocol-ops after a replay (`RegistryPostState`).
 
     function test_applyCTMUpgrade_leavesTheTransitionCommittedAndTheCTMOnItsTarget() public {
         assertEq(chainContractAddress.upgradeTransition(0), address(0), "nothing is committed before");
         _execute(transition);
         _assertTransitionApplied(chainContractAddress, ICTMTransition(address(transition)), address(ctmExecutor));
+    }
+
+    /// @dev `applyCTMUpgrade` reverts unless the CTM recorded the transition and reached its target.
+    ///      Only a faulty CTM implementation could do otherwise, so the CTM's commit and its reads are
+    ///      MOCKED here to isolate the executor's post-check from the real CTM, which always records.
+    function test_revertWhen_theCTMDoesNotLandTheCommit() public {
+        vm.mockCall(
+            address(chainContractAddress),
+            abi.encodeCall(IChainTypeManager.setNewVersionUpgradeFromTransition, (ICTMTransition(address(transition)))),
+            ""
+        );
+        vm.expectRevert(abi.encodeWithSelector(TransitionNotCommitted.selector, address(transition), address(0)));
+        _execute(transition);
+
+        vm.mockCall(
+            address(chainContractAddress),
+            abi.encodeCall(IChainTypeManager.upgradeTransition, (0)),
+            abi.encode(address(transition))
+        );
+        vm.expectRevert(abi.encodeWithSelector(OutdatedProtocolVersion.selector, 0, newVersion));
+        _execute(transition);
+
+        vm.clearMockedCalls();
+        assertEq(chainContractAddress.upgradeTransition(0), address(0), "nothing is committed");
+        assertEq(chainContractAddress.protocolVersion(), 0, "the CTM version did not move");
     }
 
     /// @dev A later hop moves the CTM on; the earlier departure keeps naming its transition.
@@ -637,15 +697,17 @@ contract CTMUpgradeExecutorTest is CTMUpgradeExecutorFixture {
         ctmExecutor.upgradeChain(ICTMTransition(address(differentTransition)), chainId);
     }
 
+    /// @dev Only the owner and the chain's own admin may cross a chain; the after-deadline leg is
+    ///      `RegistryDrivenUpgrade.t.sol::test_revertWhen_strangerUpgradesChainAfterDeadline`.
     function test_revertWhen_strangerUpgradesChainBeforeDeadline() public {
         _execute(transition);
 
-        // Owner-driven during the window; permissionless only once the old-version deadline
-        // (1000, set by the transition) has passed. The happy permissionless path is exercised
-        // in RegistryDrivenUpgrade.t.sol with a real upgrade engine.
+        address stranger = makeAddr("stranger");
+        uint256 versionBefore = IGetters(chainAddress).getProtocolVersion();
         vm.warp(999);
-        vm.expectRevert(abi.encodeWithSelector(UpgradeNotPermissionlessYet.selector, 1000));
-        vm.prank(makeAddr("stranger"));
+        vm.expectRevert(abi.encodeWithSelector(Unauthorized.selector, stranger));
+        vm.prank(stranger);
         ctmExecutor.upgradeChain(ICTMTransition(address(transition)), chainId);
+        assertEq(IGetters(chainAddress).getProtocolVersion(), versionBefore, "the chain did not cross");
     }
 }

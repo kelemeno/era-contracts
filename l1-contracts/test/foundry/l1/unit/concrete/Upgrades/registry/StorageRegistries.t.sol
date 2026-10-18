@@ -39,13 +39,19 @@ import {
     L2PlanTooManyFactoryDeps,
     PatchCannotCarryL2Upgrade,
     L1OnlyEdgeChangesL2State,
+    RegistryDuplicateFacetRow,
+    RegistryDuplicateProxyRow,
+    RegistrySelfEdgeProxyRow,
     RegistryDuplicateSelector,
     RegistryEmptySelectors,
+    RegistryInventoryLengthMismatch,
     RegistryMemberHasNoFixedAddress,
     RegistryTargetHasNoCode,
     ReleaseForceDeploymentMismatch,
+    RegistryUnknownKey,
     TransitionDeadlineBeforeUpgrade,
-    TransitionDeadlineZero
+    TransitionDeadlineZero,
+    ZeroAddress
 } from "contracts/common/L1ContractErrors.sol";
 import {
     NewProtocolMajorVersionNotZero,
@@ -634,17 +640,20 @@ contract StorageRegistriesTest is Test {
         new CTMTransition(manifest);
     }
 
-    /// @dev A split-row release (the same facet address in two rows) pins — construction does not
-    ///      read routing — and is refused by `validate()` when installed: the facet's selectors
-    ///      appear twice in the routing (objlib-05). `ReleaseFacetRows.t.sol` carries the rest.
+    /// @dev A split-row release (the same facet address in two rows) is now refused by the release
+    ///      itself, at construction — so no transition can ever be derived toward one. Retargeted
+    ///      from the derivation-time `RegistryDuplicateSelector` this used to trip: the check moved
+    ///      earlier, it did not go away. `ReleaseFacetRows.t.sol` carries the rest of it (the same
+    ///      refusal from `validate()`, on an object whose constructor never ran the check); the
+    ///      derivation-time selector check is still exercised by the collision test below, which
+    ///      uses a DISTINCT facet carrying an already-routed selector.
     function test_revertWhen_releaseSplitsOneFacetAcrossTwoRows() public {
         ReleaseManifest memory manifest = _newReleaseManifest();
         // Same facet address in two rows: its selectors would appear twice in the routing.
         manifest.genesisFacets[2].facet = facetShared;
-        CTMRelease release = new CTMRelease(manifest);
 
-        vm.expectPartialRevert(RegistryDuplicateSelector.selector);
-        release.validate();
+        vm.expectRevert(abi.encodeWithSelector(RegistryDuplicateFacetRow.selector, facetShared));
+        new CTMRelease(manifest);
     }
 
     /// @dev Regression: the transition must enforce the SAME version shape chains enforce at
@@ -746,13 +755,44 @@ contract StorageRegistriesTest is Test {
         );
     }
 
-    /// @dev Pre-registry migration is one-time migration code, not a permanent zero-source special
-    ///      case: the edge's version is read off `fromRelease`, which fails on a zero address.
+    /// @dev The CTM reads the deadline on every batch commit of a chain on the departing version
+    ///      (`protocolVersionIsActive`), so it is served from its own slot, not by decoding the
+    ///      manifest.
+    function test_oldProtocolVersionDeadlineIsServedWithoutDecodingTheManifest() public {
+        TransitionManifest memory manifest = _transitionManifest();
+        CTMTransition newTransition = new CTMTransition(manifest);
+
+        uint256 gasBefore = gasleft();
+        uint256 deadline = newTransition.oldProtocolVersionDeadline();
+        uint256 scalarReadGas = gasBefore - gasleft();
+        gasBefore = gasleft();
+        uint256 manifestDeadline = newTransition.getManifest().oldProtocolVersionDeadline;
+        uint256 manifestReadGas = gasBefore - gasleft();
+
+        assertEq(deadline, manifest.oldProtocolVersionDeadline, "the pinned deadline");
+        assertEq(deadline, manifestDeadline, "the manifest's deadline");
+        assertLt(scalarReadGas, manifestReadGas / 2, "the getter must not decode the manifest");
+    }
+
     function test_revertWhen_fromReleaseZero() public {
+        // Pre-registry migration is one-time migration code in the legacy scripts, not a
+        // permanent zero-source special case.
         TransitionManifest memory manifest = _transitionManifest();
         manifest.fromRelease = address(0);
 
-        vm.expectRevert(bytes(""));
+        vm.expectRevert(ZeroAddress.selector);
+        new CTMTransition(manifest);
+    }
+
+    function test_revertWhen_newReleaseOrEngineZero() public {
+        TransitionManifest memory manifest = _transitionManifest();
+        manifest.newRelease = address(0);
+        vm.expectRevert(ZeroAddress.selector);
+        new CTMTransition(manifest);
+
+        manifest = _transitionManifest();
+        manifest.upgradeEngine = address(0);
+        vm.expectRevert(ZeroAddress.selector);
         new CTMTransition(manifest);
     }
 
@@ -771,65 +811,76 @@ contract StorageRegistriesTest is Test {
         assertEq(keccak256(abi.encode(infrastructure.getManifest())), keccak256(abi.encode(manifest)));
     }
 
-    /// @dev The object pins any inventory: its shape (one slot per member of the domain's enum, a
-    ///      participating row at all, no zero field, no self-edge, one row per proxy) is a review-time
-    ///      fact protocol-ops checks (`rows::verify_inventory`). On chain a malformed row is skipped
-    ///      or reverts where it is applied (`CoreUpgradeExecutor.t.sol`).
-    function test_theObjectPinsAnInventoryOfAnyShape() public {
-        // The other domain's length, both ways.
+    /// @dev The inventory length is the DOMAIN's: a Core manifest carrying the CTM inventory's length
+    ///      (or the reverse) is refused, so an object cannot be built over the other domain's index
+    ///      space by choosing its own length.
+    function test_revertWhen_theInventoryHasTheOtherDomainsLength() public {
         ProxyUpgradeTransitionManifest memory ctmShaped = _ctmManifestWithTwoRows();
         ctmShaped.domain = ProxyUpgradeDomain.Core;
-        assertEq(new ProxyUpgradeTransition(ctmShaped).rows().length, 2, "a CTM-length Core inventory pins");
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                RegistryInventoryLengthMismatch.selector,
+                L1_ECOSYSTEM_CONTRACT_COUNT,
+                CTM_CONTRACT_COUNT
+            )
+        );
+        new ProxyUpgradeTransition(ctmShaped);
+
         ProxyUpgradeTransitionManifest memory coreShaped = _coreManifest();
         coreShaped.domain = ProxyUpgradeDomain.CTM;
-        assertEq(new ProxyUpgradeTransition(coreShaped).rows().length, 1, "a Core-length CTM inventory pins");
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                RegistryInventoryLengthMismatch.selector,
+                CTM_CONTRACT_COUNT,
+                L1_ECOSYSTEM_CONTRACT_COUNT
+            )
+        );
+        new ProxyUpgradeTransition(coreShaped);
+    }
 
-        // Too short.
-        ProxyUpgradeTransitionManifest memory tooShort = _coreManifest();
-        ProxyUpgradeRow[] memory shortRows = new ProxyUpgradeRow[](L1_ECOSYSTEM_CONTRACT_COUNT - 1);
-        shortRows[uint256(L1EcosystemContract.L1Bridgehub)] = tooShort.proxyUpgrades[
-            uint256(L1EcosystemContract.L1Bridgehub)
-        ];
-        tooShort.proxyUpgrades = shortRows;
-        assertEq(new ProxyUpgradeTransition(tooShort).rows().length, 1, "a too-short inventory pins");
+    function test_revertWhen_ctmInventoryLengthMismatch() public {
+        ProxyUpgradeTransitionManifest memory manifest = _ctmManifestWithTwoRows();
+        ProxyUpgradeRow[] memory tooShort = new ProxyUpgradeRow[](CTM_CONTRACT_COUNT - 1);
+        tooShort[uint256(CTMContract.ChainTypeManager)] = manifest.proxyUpgrades[uint256(CTMContract.ChainTypeManager)];
+        manifest.proxyUpgrades = tooShort;
 
-        // Nothing participating.
-        ProxyUpgradeTransitionManifest memory inert = ProxyUpgradeTransitionManifest({
+        vm.expectRevert(
+            abi.encodeWithSelector(RegistryInventoryLengthMismatch.selector, CTM_CONTRACT_COUNT, CTM_CONTRACT_COUNT - 1)
+        );
+        new ProxyUpgradeTransition(manifest);
+    }
+
+    /// @dev An all-inert CTM inventory changes nothing: an upgrade that leaves the CTM domain alone
+    ///      omits that leg instead of deploying an empty object.
+    function test_revertWhen_aCtmInventoryChangesNothing() public {
+        ProxyUpgradeTransitionManifest memory manifest = ProxyUpgradeTransitionManifest({
             domain: ProxyUpgradeDomain.CTM,
             proxyUpgrades: new ProxyUpgradeRow[](CTM_CONTRACT_COUNT)
         });
-        assertEq(new ProxyUpgradeTransition(inert).rows().length, 0, "an empty inventory pins and applies nothing");
-
-        // A zero source, a duplicate proxy, a self-edge.
-        ProxyUpgradeTransitionManifest memory zeroSource = _coreManifest();
-        zeroSource.proxyUpgrades[uint256(L1EcosystemContract.L1Bridgehub)].expectedOldImpl = address(0);
-        assertEq(new ProxyUpgradeTransition(zeroSource).rows()[0].expectedOldImpl, address(0));
-        ProxyUpgradeTransitionManifest memory duplicate = _coreManifest();
-        duplicate.proxyUpgrades[uint256(L1EcosystemContract.L1MessageRoot)] = duplicate.proxyUpgrades[
-            uint256(L1EcosystemContract.L1Bridgehub)
-        ];
-        assertEq(new ProxyUpgradeTransition(duplicate).rows().length, 2, "a duplicated proxy pins as two rows");
-        ProxyUpgradeTransitionManifest memory selfEdge = _coreManifest();
-        selfEdge.proxyUpgrades[uint256(L1EcosystemContract.L1Bridgehub)].expectedOldImpl = selfEdge
-            .proxyUpgrades[uint256(L1EcosystemContract.L1Bridgehub)]
-            .implNew;
-        assertEq(new ProxyUpgradeTransition(selfEdge).rows().length, 1, "a self-edge pins");
+        vm.expectRevert(RegistryUnknownKey.selector);
+        new ProxyUpgradeTransition(manifest);
     }
 
     /// @dev The rows are exactly the participating slots, in slot order — never one with a zero
-    ///      `implNew`, including a half-filled slot naming a proxy but no implementation (objlib-46).
+    ///      `implNew`, including an inert slot naming a proxy but no implementation (objlib-46).
     function testFuzz_rowsAreExactlyTheParticipatingSlots(uint256 _implMask, uint256 _proxyMask) public {
         ProxyUpgradeRow[] memory slots = new ProxyUpgradeRow[](L1_ECOSYSTEM_CONTRACT_COUNT);
         uint256 participating = 0;
         for (uint256 i = 0; i < slots.length; ++i) {
-            if ((_proxyMask >> i) & 1 == 1) {
+            if ((_implMask >> i) & 1 == 1) {
+                // A participating slot is a full, unique edge.
+                slots[i] = ProxyUpgradeRow({
+                    proxy: address(uint160(0xA000 + i)),
+                    expectedOldImpl: address(uint160(0xC000 + i)),
+                    implNew: address(uint160(0xB000 + i)),
+                    callInitializeUpgrade: false
+                });
+                ++participating;
+            } else if ((_proxyMask >> i) & 1 == 1) {
                 slots[i].proxy = address(uint160(0xA000 + i));
             }
-            if ((_implMask >> i) & 1 == 1) {
-                slots[i].implNew = address(uint160(0xB000 + i));
-                ++participating;
-            }
         }
+        vm.assume(participating != 0);
         ProxyUpgradeRow[] memory rows = new ProxyUpgradeTransition(
             ProxyUpgradeTransitionManifest({domain: ProxyUpgradeDomain.Core, proxyUpgrades: slots})
         ).rows();
@@ -1426,11 +1477,10 @@ contract StorageRegistriesTest is Test {
 
     // ─────────────────────────── routing hygiene ───────────────────────────
 
-    /// @dev A facet describing no selectors constructs — the release is pinned data and does not
-    ///      read routing at construction — and so does a transition toward it; `validate()` refuses
-    ///      it, so the commit installing it is refused before any chain could install an empty `Add`
-    ///      cut (`CommitChecks.t.sol`).
-    function test_selectorlessFacetPinsButTheReleaseDoesNotValidate() public {
+    function test_selectorlessFacetPinsButNoTransitionDerivesTowardIt() public {
+        // A facet describing no selectors constructs — the release is pinned data and does not
+        // read routing at construction — but `validate()` refuses it, so a transition toward it
+        // is refused before it could derive (and a chain later install) an empty `Add` cut.
         address emptyFacet = address(new MockSelfDescribingFacet(new bytes4[](0)));
         ReleaseManifest memory manifest = _newReleaseManifest();
         manifest.genesisFacets[1].facet = emptyFacet;
@@ -1440,10 +1490,8 @@ contract StorageRegistriesTest is Test {
 
         TransitionManifest memory transitionManifest = _transitionManifest();
         transitionManifest.newRelease = address(release);
-        new CTMTransition(transitionManifest);
-
         vm.expectRevert(abi.encodeWithSelector(RegistryEmptySelectors.selector, emptyFacet));
-        release.validate();
+        new CTMTransition(transitionManifest);
     }
 
     function test_revertWhen_releaseHasNoFacets() public {
@@ -1458,25 +1506,25 @@ contract StorageRegistriesTest is Test {
 
     function test_revertWhen_releaseNamesCodelessFacet() public {
         // A facet must be ACTUAL code: the release reads its routing out of it, and a codeless
-        // address answers that read with an empty revert, which `validate()` propagates at
-        // install (objlib-11). The facet's code is stripped after construction.
+        // address answers that read with an empty revert. Refused by `validate()`, which holds the
+        // requirement on every execution path. The facet self-describes normally at construction;
+        // its code is stripped afterwards to model a member that no longer carries code at
+        // validation time.
         address codeless = address(new MockSelfDescribingFacet(_selectors1(bytes4(uint32(0x99)))));
         ReleaseManifest memory manifest = _newReleaseManifest();
         manifest.genesisFacets[0].facet = codeless;
         CTMRelease codelessRelease = new CTMRelease(manifest);
         vm.etch(codeless, "");
 
-        vm.expectRevert(bytes(""));
+        vm.expectRevert(abi.encodeWithSelector(RegistryTargetHasNoCode.selector, codeless));
         codelessRelease.validate();
     }
 
-    /// @dev A selector routed twice constructs as a release (the routing lives in the facets' code),
-    ///      and a transition toward it constructs too: releases are validated where they are
-    ///      installed, so the commit of such a transition is refused, before the CTM version moves
-    ///      (`CommitChecks.t.sol`). protocol-ops `eth_call`s the release's `validate()` before the
-    ///      vote (objlib-16). The colliding facet self-describes a selector facetFrozen also carries
-    ///      (0x20).
-    function test_aTransitionTowardASelectorCollisionConstructsButTheReleaseDoesNotValidate() public {
+    function test_revertWhen_transitionDerivesTowardSelectorCollision() public {
+        // A selector routed twice constructs as a release (the routing lives in the facets' code)
+        // but fails the `validate()` a transition runs on both releases at construction —
+        // pre-commit, so a malformed routing can never strand chains behind a bumped CTM version.
+        // The colliding facet self-describes a selector facetFrozen also carries (0x20).
         address collidingFacet = address(new MockSelfDescribingFacet(_selectors1(bytes4(uint32(0x20)))));
         ReleaseManifest memory manifest = _newReleaseManifest();
         manifest.genesisFacets[1].facet = collidingFacet;
@@ -1484,11 +1532,9 @@ contract StorageRegistriesTest is Test {
 
         TransitionManifest memory transitionManifest = _transitionManifest();
         transitionManifest.newRelease = address(collidingRelease);
-        CTMTransition toward = new CTMTransition(transitionManifest);
-        assertEq(toward.newRelease(), address(collidingRelease));
 
         vm.expectRevert(abi.encodeWithSelector(RegistryDuplicateSelector.selector, bytes4(uint32(0x20))));
-        collidingRelease.validate();
+        new CTMTransition(transitionManifest);
     }
 
     // ─────────────────────────── release provenance ───────────────────────────
@@ -1529,21 +1575,49 @@ contract StorageRegistriesTest is Test {
         committed.validate();
     }
 
-    /// @dev A release checks its own members; the transition checks only the code it names itself,
-    ///      so a codeless facet of either release does not surface through the transition (the CTM
-    ///      validates a release when it installs it).
+    /// @dev A release checks its own members. A transition checks only the code it names itself:
+    ///      its releases are validated at its construction and where they are installed.
     function test_validateRejectsAMemberThatLostItsCode() public {
         newRelease.validate();
         transition.validate();
 
-        // A codeless facet fails its `selectors()` read without data.
         vm.etch(facetOldAdmin, "");
-        vm.expectRevert(bytes(""));
+        vm.expectRevert(abi.encodeWithSelector(RegistryTargetHasNoCode.selector, facetOldAdmin));
         fromRelease.validate();
         transition.validate();
     }
 
     // ─────────────────────────── Core-domain inventory ───────────────────────────
+
+    function test_revertWhen_inventoryLengthDoesNotMatchTheEnum() public {
+        // The dynamic inventory must be exactly one slot per enum member, so every contract of
+        // the domain HAS a slot and none can be smuggled in. Whether the slot says what the
+        // upgrade meant is preparation's job, not this length check's.
+        ProxyUpgradeTransitionManifest memory manifest = _coreManifest();
+        ProxyUpgradeRow[] memory tooShort = new ProxyUpgradeRow[](L1_ECOSYSTEM_CONTRACT_COUNT - 1);
+        tooShort[uint256(L1EcosystemContract.L1Bridgehub)] = manifest.proxyUpgrades[
+            uint256(L1EcosystemContract.L1Bridgehub)
+        ];
+        manifest.proxyUpgrades = tooShort;
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                RegistryInventoryLengthMismatch.selector,
+                L1_ECOSYSTEM_CONTRACT_COUNT,
+                L1_ECOSYSTEM_CONTRACT_COUNT - 1
+            )
+        );
+        new ProxyUpgradeTransition(manifest);
+    }
+
+    function test_revertWhen_upgradingRowMissingSource() public {
+        // A participating slot must be a full edge: known source implementation.
+        ProxyUpgradeTransitionManifest memory manifest = _coreManifest();
+        manifest.proxyUpgrades[uint256(L1EcosystemContract.L1Bridgehub)].expectedOldImpl = address(0);
+
+        vm.expectRevert(ZeroAddress.selector);
+        new ProxyUpgradeTransition(manifest);
+    }
 
     function test_inertSlotIsExplicitNotUpgradedAndProducesNoRow() public {
         // A slot with zero `implNew` is the inventory's explicit "not upgraded" statement:
@@ -1554,6 +1628,43 @@ contract StorageRegistriesTest is Test {
         ProxyUpgradeTransition registry = new ProxyUpgradeTransition(manifest);
         assertEq(registry.rows().length, 1, "the inert slot must be dropped at the flatten boundary");
         assertEq(registry.rows()[0].proxy, address(0xB001), "the participating slot must survive");
+    }
+
+    function test_revertWhen_everyInventorySlotIsInert() public {
+        // A registry whose whole inventory is "not upgraded" upgrades nothing — refused.
+        ProxyUpgradeTransitionManifest memory manifest = _coreManifest();
+        manifest.proxyUpgrades[uint256(L1EcosystemContract.L1Bridgehub)].implNew = address(0);
+
+        vm.expectRevert(RegistryUnknownKey.selector);
+        new ProxyUpgradeTransition(manifest);
+    }
+
+    function test_revertWhen_coreTransitionHasDuplicateProxyRow() public {
+        // A proxy is routed once: two slots naming the same proxy are rejected.
+        ProxyUpgradeTransitionManifest memory manifest = _coreManifest();
+        // same proxy again, in another contract's slot
+        manifest.proxyUpgrades[uint256(L1EcosystemContract.L1MessageRoot)] = manifest.proxyUpgrades[
+            uint256(L1EcosystemContract.L1Bridgehub)
+        ];
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                RegistryDuplicateProxyRow.selector,
+                manifest.proxyUpgrades[uint256(L1EcosystemContract.L1Bridgehub)].proxy
+            )
+        );
+        new ProxyUpgradeTransition(manifest);
+    }
+
+    function test_revertWhen_coreTransitionHasSelfEdgeRow() public {
+        // A row whose source is its target swaps nothing and would skip its initializer: an
+        // authoring mistake, rejected at construction.
+        ProxyUpgradeTransitionManifest memory manifest = _coreManifest();
+        ProxyUpgradeRow memory row = manifest.proxyUpgrades[uint256(L1EcosystemContract.L1Bridgehub)];
+        manifest.proxyUpgrades[uint256(L1EcosystemContract.L1Bridgehub)].expectedOldImpl = row.implNew;
+
+        vm.expectRevert(abi.encodeWithSelector(RegistrySelfEdgeProxyRow.selector, row.proxy));
+        new ProxyUpgradeTransition(manifest);
     }
 
     // ─────────────────────────── CTM-domain inventory ───────────────────────────

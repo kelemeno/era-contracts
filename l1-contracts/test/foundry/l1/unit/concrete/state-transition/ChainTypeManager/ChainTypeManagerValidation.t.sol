@@ -17,6 +17,8 @@ import {IChainTypeManager, ChainTypeManagerInitializeData} from "contracts/state
 import {ICTMRelease} from "contracts/upgrades/registry/objects/ICTMRelease.sol";
 import {ZKsyncOSTestnetVerifier} from "contracts/state-transition/verifiers/ZKsyncOSTestnetVerifier.sol";
 import {DataEncoding} from "contracts/common/libraries/DataEncoding.sol";
+import {GenesisBatchHashZero, ZeroAddress} from "contracts/common/L1ContractErrors.sol";
+import {L2_BRIDGEHUB_ADDR} from "contracts/common/l2-helpers/L2ContractAddresses.sol";
 import {ICTMDeploymentTracker} from "contracts/core/ctm-deployment/ICTMDeploymentTracker.sol";
 
 import {L1MessageRoot} from "contracts/core/message-root/L1MessageRoot.sol";
@@ -27,10 +29,9 @@ import {L1ChainAssetHandler} from "contracts/core/chain-asset-handler/L1ChainAss
 import {IL1MessageRoot} from "contracts/core/message-root/IL1MessageRoot.sol";
 import {CTMRelease} from "contracts/upgrades/registry/objects/CTMRelease.sol";
 
-/// @notice Initialization and version-edge validation of a CTM over a mocked genesis release. The
-///         genesis params themselves are the release's to validate (a zero batch hash is refused
-///         by its constructor, a codeless genesis upgrade by its `validate()`), so they are tested
-///         on `CTMRelease` and, through the CTM, in `Initialize.t.sol` with real releases.
+/// @notice Construction, initialization and version-edge validation of a CTM over a mocked genesis
+///         release. A codeless genesis upgrade is the release's `validate()` to refuse, so it is
+///         tested on `CTMRelease` and, through the CTM, in `Initialize.t.sol` with real releases.
 contract ChainTypeManagerValidationTest is UtilsCallMockerTest {
     using stdStorage for StdStorage;
 
@@ -48,6 +49,7 @@ contract ChainTypeManagerValidationTest is UtilsCallMockerTest {
     address internal sharedBridge;
     address internal validator;
     address internal serverNotifier;
+    address internal permissionlessValidator;
     bytes32 internal baseTokenAssetId;
     uint256 internal chainId = 112;
     address internal testnetVerifier;
@@ -65,6 +67,7 @@ contract ChainTypeManagerValidationTest is UtilsCallMockerTest {
         sharedBridge = makeAddr("sharedBridge");
         validator = makeAddr("validator");
         serverNotifier = makeAddr("serverNotifier");
+        permissionlessValidator = makeAddr("permissionlessValidator");
         baseTokenAssetId = DataEncoding.encodeNTVAssetId(block.chainid, baseToken);
         testnetVerifier = address(new ZKsyncOSTestnetVerifier(IVerifier(address(0))));
 
@@ -102,7 +105,7 @@ contract ChainTypeManagerValidationTest is UtilsCallMockerTest {
             address(bridgehub),
             interopCenterAddress,
             address(0),
-            address(0),
+            permissionlessValidator,
             address(0)
         );
         diamondInit = address(new DiamondInit());
@@ -174,8 +177,8 @@ contract ChainTypeManagerValidationTest is UtilsCallMockerTest {
         return ChainTypeManager(address(transparentUpgradeableProxy));
     }
 
-    /// @dev The genesis release is where the CTM reads its initial version from: a zero one fails
-    ///      that read, which reverts the proxy's initializing delegatecall.
+    /// @dev The genesis release is where the CTM reads its initial version from, so it is
+    ///      refused before anything is read from it.
     function test_RevertWhen_initializedWithoutARelease() public {
         vm.startPrank(address(bridgehub));
         ChainTypeManagerInitializeData memory ctmInitializeData = ChainTypeManagerInitializeData({
@@ -184,13 +187,74 @@ contract ChainTypeManagerValidationTest is UtilsCallMockerTest {
             currentRelease: address(0),
             serverNotifier: serverNotifier
         });
-        vm.expectRevert("Address: low-level delegate call failed");
+        vm.expectRevert(ZeroAddress.selector);
         new TransparentUpgradeableProxy(
             address(chainTypeManager),
             admin,
             abi.encodeCall(IChainTypeManager.initialize, ctmInitializeData)
         );
         vm.stopPrank();
+    }
+
+    /// @dev A proxy over the CTM implementation that nobody has initialized yet, so a test can
+    ///      call `initialize` itself and inspect the proxy after a refused call.
+    function _uninitializedProxy() internal returns (ChainTypeManager) {
+        return ChainTypeManager(address(new TransparentUpgradeableProxy(address(chainTypeManager), admin, "")));
+    }
+
+    function _initializeData() internal view returns (ChainTypeManagerInitializeData memory) {
+        return
+            ChainTypeManagerInitializeData({
+                owner: governor,
+                validatorTimelock: validator,
+                currentRelease: Utils.TEST_GENESIS_REGISTRY,
+                serverNotifier: serverNotifier
+            });
+    }
+
+    /// @dev Asserts that a refused `initialize` left the proxy as it was.
+    function _assertUninitialized(ChainTypeManager _ctm) internal view {
+        assertEq(_ctm.owner(), address(0), "no owner");
+        assertEq(_ctm.validatorTimelockPostV29(), address(0), "no validator timelock");
+        assertEq(_ctm.serverNotifierAddress(), address(0), "no server notifier");
+        assertEq(_ctm.currentRelease(), address(0), "no release");
+    }
+
+    function test_RevertWhen_initializedWithAZeroValidatorTimelock() public {
+        _mockGenesisParams(address(genesisUpgradeContract), bytes32(uint256(0x01)), 0x01);
+        ChainTypeManager ctm = _uninitializedProxy();
+        ChainTypeManagerInitializeData memory data = _initializeData();
+        data.validatorTimelock = address(0);
+
+        vm.expectRevert(ZeroAddress.selector);
+        ctm.initialize(data);
+
+        _assertUninitialized(ctm);
+    }
+
+    function test_RevertWhen_initializedWithAZeroServerNotifier() public {
+        _mockGenesisParams(address(genesisUpgradeContract), bytes32(uint256(0x01)), 0x01);
+        ChainTypeManager ctm = _uninitializedProxy();
+        ChainTypeManagerInitializeData memory data = _initializeData();
+        data.serverNotifier = address(0);
+
+        vm.expectRevert(ZeroAddress.selector);
+        ctm.initialize(data);
+
+        _assertUninitialized(ctm);
+    }
+
+    /// @dev Every chain created from a release with a zero genesis batch hash would get an unusable
+    ///      batch zero. A real `CTMRelease` refuses one at construction, so its `genesisParams()`
+    ///      is mocked here to isolate the CTM's own check from the release's.
+    function test_RevertWhen_genesisBatchHashIsZero() public {
+        _mockGenesisParams(address(genesisUpgradeContract), bytes32(0), 0x01);
+        ChainTypeManager ctm = _uninitializedProxy();
+
+        vm.expectRevert(GenesisBatchHashZero.selector);
+        ctm.initialize(_initializeData());
+
+        _assertUninitialized(ctm);
     }
 
     // ============================================================
@@ -202,11 +266,32 @@ contract ChainTypeManagerValidationTest is UtilsCallMockerTest {
             address(bridgehub),
             interopCenterAddress,
             address(0),
-            address(0),
+            permissionlessValidator,
             address(0)
         );
         assertEq(ctm.BRIDGE_HUB(), address(bridgehub));
+        assertEq(ctm.PERMISSIONLESS_VALIDATOR(), permissionlessValidator);
         assertTrue(ctm.isZKsyncOS());
+    }
+
+    /// @dev Every chain an L1 CTM creates stores its permissionless validator, the only settler of
+    ///      a chain in priority mode.
+    function test_RevertWhen_anL1CTMIsConstructedWithoutAPermissionlessValidator() public {
+        vm.expectRevert(ZeroAddress.selector);
+        new ChainTypeManager(address(bridgehub), interopCenterAddress, address(0), address(0), address(0));
+    }
+
+    /// @dev Priority mode exists on L1 only, so a Gateway CTM is constructed without one.
+    function test_aGatewayCTMNeedsNoPermissionlessValidator() public {
+        ChainTypeManager ctm = new ChainTypeManager(
+            L2_BRIDGEHUB_ADDR,
+            interopCenterAddress,
+            address(0),
+            address(0),
+            address(0)
+        );
+        assertEq(ctm.BRIDGE_HUB(), L2_BRIDGEHUB_ADDR);
+        assertEq(ctm.PERMISSIONLESS_VALIDATOR(), address(0));
     }
 
     // ============================================================

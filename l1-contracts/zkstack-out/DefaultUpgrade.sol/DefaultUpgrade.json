@@ -404,6 +404,11 @@
   },
   {
     "type": "error",
+    "name": "NewProtocolMajorVersionNotZero",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "NoFunctionsForDiamondCut",
     "inputs": []
   },
@@ -424,6 +429,11 @@
   },
   {
     "type": "error",
+    "name": "PreviousProtocolMajorVersionNotZero",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "PreviousUpgradeNotCleaned",
     "inputs": []
   },
@@ -435,6 +445,22 @@
         "name": "txHash",
         "type": "bytes32",
         "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ProtocolVersionMinorDeltaTooBig",
+    "inputs": [
+      {
+        "name": "limit",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "proposed",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ]
   },
@@ -519,12 +545,27 @@
   },
   {
     "type": "error",
+    "name": "TooManyFactoryDeps",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "TooMuchGas",
     "inputs": []
   },
   {
     "type": "error",
+    "name": "UndefinedDiamondCutAction",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "ValidateTxnNotEnoughGas",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ZeroAddress",
     "inputs": []
   }
 ]

@@ -56,9 +56,8 @@ library TransitionDerivationLib {
         if (keccak256(abi.encode(fromFacets)) == keccak256(abi.encode(newFacets))) {
             return facetCuts;
         }
-        // Both releases pass `validate()` before a transition between them can commit (one is
-        // installed, the commit installs the other), so every row has selectors and none is
-        // routed twice: one cut per row.
+        // Both releases passed `validate()` in the transition's constructor, so every row has
+        // selectors and none is routed twice: one cut per row.
         uint256 fromFacetsLength = fromFacets.length;
         uint256 newFacetsLength = newFacets.length;
         facetCuts = new Diamond.FacetCut[](fromFacetsLength + newFacetsLength);

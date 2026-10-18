@@ -23,6 +23,7 @@ import {IBridgehubBase} from "contracts/core/bridgehub/IBridgehubBase.sol";
 import {IOwnable} from "contracts/common/interfaces/IOwnable.sol";
 import {stdToml} from "forge-std/StdToml.sol";
 import {IChainTypeManager} from "contracts/state-transition/IChainTypeManager.sol";
+import {ChainTypeManager} from "contracts/state-transition/ChainTypeManager.sol";
 import {IGetters} from "contracts/state-transition/chain-interfaces/IGetters.sol";
 import {IZKChain} from "contracts/state-transition/chain-interfaces/IZKChain.sol";
 import {Diamond} from "contracts/state-transition/libraries/Diamond.sol";
@@ -132,12 +133,24 @@ contract ChainUpgradeForLocalTest is DefaultChainUpgrade {
     }
 }
 
+/// @notice Chain leg of the bootstrap edge for a chain whose admin does not act: the CTM owner
+///         crosses it through its checked cut-taking passthrough, which hands the committed cut to
+///         the chain's pre-v35 entrypoint.
+/// @dev Pranks the CTM's owner, the CTM executor that governance drives through `forward`.
+contract ChainUpgradeByCTMOwnerForLocalTest is DefaultChainUpgrade {
+    function upgradeChain(Diamond.DiamondCutData memory diamondCutData) public override {
+        ChainTypeManager ctm = ChainTypeManager(IZKChain(config.chainDiamondProxyAddress).getChainTypeManager());
+        vm.prank(ctm.owner());
+        ctm.upgradeChainFromVersion(config.chainChainId, config.oldProtocolVersion, diamondCutData);
+    }
+}
+
 /// @notice The fixture the v35 BOOTSTRAP edge leaves behind, built through the real prepare
 ///         pipeline: a fresh ecosystem + Era chain at the baseline version, `CTMUpgrade_v35`
 ///         deploying the executor + `RegistryBootstrapMigration`, and the one governance bundle
 ///         `RegistryBootstrapSequence` derives (the notifier accept, the ecosystem handover and core
-///         leg, nominate the CTM, hand over its ProxyAdmin, and `migrate()` — which itself
-///         completes the executor's accept) performing the whole edge.
+///         leg, nominate the CTM, hand over its ProxyAdmin, `migrate()` — which itself completes the
+///         executor's accept — and the completion check) performing the whole edge.
 /// @dev Abstract so the post-bootstrap state can be reused: it is the only in-forge fixture whose
 ///      ecosystem is registry-driven, which is what a RECURRING prepare needs to run against (see
 ///      `UpgradeTestRecurring_Local.t.sol`). Heavy execution + event assertions run in
@@ -169,7 +182,7 @@ abstract contract UpgradeIntegrationBootstrapFixture is
         return new CTMUpgradeForLocalTest();
     }
 
-    function createChainUpgrade() internal override returns (DefaultChainUpgrade) {
+    function createChainUpgrade() internal virtual override returns (DefaultChainUpgrade) {
         return new ChainUpgradeForLocalTest();
     }
 
@@ -584,8 +597,8 @@ contract UpgradeIntegrationTestLocal is UpgradeIntegrationBootstrapFixture {
     ///      and declared by the CTM prepare; the core prepare of this edge declares nothing, so the
     ///      merged bundle is exactly the object's. The harness already executed it green in
     ///      `internalTest`; this asserts the emitted shape (the notifier accept first, the ecosystem
-    ///      handover and core leg, the edge itself last), the post-state the edge leaves, and the
-    ///      notifier handover.
+    ///      handover and core leg, the completion check last), that the completion check holds, the
+    ///      post-state the edge leaves, and the notifier handover.
     function _assertBootstrapJoinsTheRegistryModel(
         CTMUpgradeForLocalTest _bootstrap,
         address _ctm,
@@ -596,7 +609,11 @@ contract UpgradeIntegrationTestLocal is UpgradeIntegrationBootstrapFixture {
         RegistryBootstrapMigration migration = _bootstrap.bootstrapMigration();
         address coreExecutor = address(coreUpgrade.getCoreUpgradeExecutor());
         Call[] memory bundle = _bootstrap.prepareGovernanceCalls();
-        assertEq(bundle.length, 6, "v35 bundle: the notifier accept, the core leg, the CTM handover, the edge");
+        assertEq(
+            bundle.length,
+            7,
+            "v35 bundle: the notifier accept, the core leg, the CTM handover, the edge, the completion check"
+        );
         assertEq(bundle[0].target, _executor, "the notifier accept opens the bundle");
         assertEq(
             bundle[1].target,
@@ -609,14 +626,17 @@ contract UpgradeIntegrationTestLocal is UpgradeIntegrationBootstrapFixture {
             abi.encodeCall(CoreUpgradeExecutor.applyL1Upgrade, (coreUpgrade.coreTransition())),
             "applyL1Upgrade(coreTransition)"
         );
-        assertEq(bundle[5].target, address(migration), "and the edge itself closes it");
+        assertEq(bundle[5].target, address(migration), "then the edge itself");
         assertEq(bundle[5].data, abi.encodeCall(RegistryBootstrapMigration.migrate, ()), "migrate()");
+        assertEq(bundle[6].target, address(migration), "and the completion check closes it");
+        assertEq(bundle[6].data, abi.encodeCall(RegistryBootstrapMigration.validateApplied, ()), "validateApplied()");
         assertEq(
             _bootstrap.externalActionEntries().length,
-            8,
-            "the CTM prepare declares the 6 derived governance calls and the 2 handover admin calls"
+            9,
+            "the CTM prepare declares the 7 derived governance calls and the 2 handover admin calls"
         );
         assertEq(coreUpgrade.externalActionEntries().length, 0, "the core prepare of a derived edge authors nothing");
+        migration.validateApplied();
         _assertBootstrapApplied(migration);
         assertEq(_bootstrap.bootstrapSequence().MIGRATION(), address(migration), "the sequence names this edge");
         assertEq(
@@ -673,5 +693,27 @@ contract UpgradeIntegrationTestLocal is UpgradeIntegrationBootstrapFixture {
             "unexpected init selector"
         );
         return abi.decode(_initCalldata[4:], (address));
+    }
+}
+
+/// @notice The bootstrap edge over the same fixture, with the lagging pre-v35 chain crossed by the
+///         CTM owner instead of its admin (see {ChainUpgradeByCTMOwnerForLocalTest}).
+contract UpgradeIntegrationTestLocalCTMOwnerCrossing is UpgradeIntegrationBootstrapFixture {
+    function createChainUpgrade() internal override returns (DefaultChainUpgrade) {
+        return new ChainUpgradeByCTMOwnerForLocalTest();
+    }
+
+    function test_theCTMOwnerCrossesAPreV35ChainOverTheBootstrapEdge() public view {
+        address release = IChainTypeManager(ctmUpgrade.getCTMAddress()).currentRelease();
+        assertEq(IGetters(_eraDiamond).getProtocolVersion(), _expectedNewVersion, "the chain crossed the edge");
+        assertEq(
+            address(IGetters(_eraDiamond).getVerifier()),
+            ICTMRelease(release).verifier(),
+            "the chain runs the pinned release's verifier"
+        );
+        assertTrue(
+            ChainRouting.matchesRelease(ICTMRelease(release), _eraDiamond),
+            "the bootstrap engine reinstalled exactly the release's routing"
+        );
     }
 }

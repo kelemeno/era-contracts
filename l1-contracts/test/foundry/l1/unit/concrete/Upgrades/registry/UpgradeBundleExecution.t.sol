@@ -29,6 +29,7 @@ import {
     L2BytecodeNotPublished,
     ProxyUpgradeDomainMismatch,
     ProxyUpgradeRowMismatch,
+    RegistryTargetHasNoCode,
     TransitionReleaseMismatch
 } from "contracts/common/L1ContractErrors.sol";
 import {ProxyUpgradeDomain, ProxyUpgradeRow} from "contracts/upgrades/registry/RegistryTypes.sol";
@@ -510,11 +511,9 @@ contract UpgradeBundleExecutionTest is CTMUpgradeExecutorFixture {
 
     /// @dev A leg naming an undeployed object would otherwise "succeed" over nothing (a call into a
     ///      codeless address returns successfully), so each entrypoint refuses it.
-    /// @dev Each leg's first read of its object (`domain()`, `fromRelease()`) fails to decode on a
-    ///      codeless address, so the proposal reverts without data and nothing stands.
     function test_revertWhen_aLegNamesAnUndeployedObject() public {
         address codeless = makeAddr("codelessObject");
-        bytes memory noCode = "";
+        bytes memory noCode = abi.encodeWithSelector(RegistryTargetHasNoCode.selector, codeless);
         _expectProposalRevert(_bundle(_coreLeg(codeless)), noCode);
         _expectProposalRevert(_bundle(_coreLeg(address(coreTransition)), _infrastructureLeg(codeless)), noCode);
         _expectProposalRevert(

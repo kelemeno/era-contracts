@@ -6,6 +6,7 @@ import {ProxyAdmin} from "@openzeppelin/contracts-v4/proxy/transparent/ProxyAdmi
 import {IProxyUpgradeTransition} from "../objects/IProxyUpgradeTransition.sol";
 import {ICoreUpgradeExecutor} from "./ICoreUpgradeExecutor.sol";
 import {UpgradeExecutorBase} from "../../../governance/UpgradeExecutorBase.sol";
+import {ZeroAddress} from "../../../common/L1ContractErrors.sol";
 import {ProxyUpgradeRowLib} from "../libraries/ProxyUpgradeRowLib.sol";
 import {ProxyUpgradeDomain} from "../RegistryTypes.sol";
 
@@ -21,9 +22,10 @@ contract CoreUpgradeExecutor is UpgradeExecutorBase, ICoreUpgradeExecutor {
     ///         executor, so transition rows apply through the same authority that validates them.
     ProxyAdmin public immutable PROXY_ADMIN;
 
-    /// @dev The binding is a review-time fact, checked off-chain against the reviewed ProxyAdmin;
-    ///      see {protocol-docs/ecosystem-upgrade.md#where-each-check-lives}.
     constructor(address _initialOwner, ProxyAdmin _proxyAdmin) UpgradeExecutorBase(_initialOwner) {
+        if (address(_proxyAdmin) == address(0)) {
+            revert ZeroAddress();
+        }
         PROXY_ADMIN = _proxyAdmin;
     }
 

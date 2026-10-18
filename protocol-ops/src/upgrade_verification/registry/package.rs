@@ -16,7 +16,7 @@
 //!   their addresses and the executors they are sent to.
 //! * a BOOTSTRAP edge, the one-time migration onto the registry model: the bundle calls
 //!   `migrate()`. Governance executes the list a `RegistryBootstrapSequence` derives (the core
-//!   transition rides it), ending in `migrate()`.
+//!   transition rides it), ending in the edge's completion check.
 //! * a transition REPLACEMENT: one `CTMUpgradeExecutor.forward` carrying
 //!   `ChainTypeManager.replaceUpgradeTransition` (see
 //!   `protocol-docs/ecosystem-upgrade-coordination.md#replacing-a-committed-transition`), and no
@@ -794,8 +794,8 @@ impl BootstrapPackage {
         let release = registry_address(root, &ctm_key, "ctm_release_addr")
             .context("[ctms.*.registry] ctm_release_addr missing, zero or unparsable")?;
         // The core leg is optional: a CTM-only edge deploys no ecosystem implementations, so
-        // the prepare pins no Core-domain `ProxyUpgradeTransition` (the verifier refuses an
-        // all-inert one).
+        // the prepare pins no Core-domain `ProxyUpgradeTransition` (an all-inert inventory is
+        // refused at construction).
         let core_transition = address_at(root, &["core", "registry", "core_transition_addr"])
             .filter(|a| !a.is_zero());
 

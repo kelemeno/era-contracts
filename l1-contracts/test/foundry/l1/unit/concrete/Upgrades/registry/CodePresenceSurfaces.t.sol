@@ -32,10 +32,10 @@ contract ValidateTargetNew {
 }
 
 /// @notice Where "the named contract is deployed code" is enforced, member by member — the MANIFEST
-///         is the spec, not the objects' code. A release's `validate()` (run once, when the CTM
-///         installs it) covers its own members; a transition's covers only the code it names itself
-///         (engine, composer); a proxy upgrade transition has no check of its own, and applying a
-///         row to a codeless implementation is refused by OZ's ERC1967 upgrade. See
+///         is the spec, not the objects' code. A release's `validate()` covers its own members; a
+///         transition's covers only the code it names itself (engine, composer); a proxy upgrade
+///         transition's rows are code-checked when applied, all of them before the first swap
+///         (`ProxyUpgradeRowLib.applyRows`). See
 ///         {protocol-docs/ecosystem-upgrade.md#where-each-check-lives}.
 /// @dev The transition under test names its optional delegate composer, so the full list is
 ///      exercised.
@@ -86,18 +86,18 @@ contract CodePresenceSurfacesTest is CTMUpgradeExecutorFixture {
 
     // ─────────────────────────────── every named member ───────────────────────────────
 
-    /// @dev The fixed members carry their own diagnostic. A facet is READ (`selectors()`), and a
-    ///      codeless one fails that read without data — covered where the facets are real
-    ///      contracts (`ReleaseFacetRows.t.sol`, `StorageRegistries.t.sol`); this fixture's facets
-    ///      answer through mocks.
     function test_everyReleaseMemberIsRequiredToHaveCode() public {
-        ReleaseManifest memory m = release.getManifest();
-        address[RELEASE_FIXED_MEMBERS] memory fixedMembers = [m.diamondInit, m.genesisUpgrade, m.verifier];
-        for (uint256 i = 0; i < RELEASE_FIXED_MEMBERS; ++i) {
+        address[] memory members = _releaseMembers(release.getManifest());
+        assertEq(
+            members.length,
+            RELEASE_FIXED_MEMBERS + facetCuts.length,
+            "the fixture release names its full facet set"
+        );
+        for (uint256 i = 0; i < members.length; ++i) {
             _assertCodelessMemberIsRefused(
                 IValidatable(address(release)),
-                fixedMembers[i],
-                abi.encodeWithSelector(RegistryTargetHasNoCode.selector, fixedMembers[i])
+                members[i],
+                abi.encodeWithSelector(RegistryTargetHasNoCode.selector, members[i])
             );
         }
     }
@@ -116,8 +116,9 @@ contract CodePresenceSurfacesTest is CTMUpgradeExecutorFixture {
         }
     }
 
-    /// @dev The releases are checked where they are installed, not again by every transition naming
-    ///      them: a transition still validates with a codeless member in either release.
+    /// @dev The releases are validated at the transition's construction and where they are
+    ///      installed, not again by the transition's own `validate()`: a transition still validates
+    ///      with a codeless member in either release.
     function test_aTransitionDoesNotRecheckItsReleases() public {
         address releaseMember = release.getManifest().genesisUpgrade;
         vm.etch(releaseMember, "");
@@ -126,16 +127,15 @@ contract CodePresenceSurfacesTest is CTMUpgradeExecutorFixture {
         release.validate();
     }
 
-    /// @dev A proxy upgrade transition of either domain has no check surface of its own: a row whose
-    ///      implementation has no code is refused when the executor applies it, by OZ's
-    ///      `ERC1967Upgrade._setImplementation`, and nothing of the leg stands.
+    /// @dev A row whose implementation has no code is refused, with its own diagnostic, when an
+    ///      executor of either domain applies it, before any proxy moves.
     function test_aRowWithACodelessImplementationIsRefusedWhenApplied() public {
         assertEq(coreTransition.rows()[0].implNew, implNew);
         assertEq(infrastructure.rows()[0].implNew, implNew);
         vm.etch(implNew, "");
 
         vm.prank(governor);
-        vm.expectRevert("ERC1967: new implementation is not a contract");
+        vm.expectRevert(abi.encodeWithSelector(RegistryTargetHasNoCode.selector, implNew));
         coreExecutor.applyL1Upgrade(coreTransition);
         assertEq(
             ecosystemProxyAdmin.getProxyImplementation(ITransparentUpgradeableProxy(address(ecosystemProxy))),
@@ -144,7 +144,7 @@ contract CodePresenceSurfacesTest is CTMUpgradeExecutorFixture {
         );
 
         vm.prank(governor);
-        vm.expectRevert("ERC1967: new implementation is not a contract");
+        vm.expectRevert(abi.encodeWithSelector(RegistryTargetHasNoCode.selector, implNew));
         ctmExecutor.applyInfrastructureUpgrade(infrastructure);
         assertEq(
             ctmProxyAdmin.getProxyImplementation(ITransparentUpgradeableProxy(address(ctmDomainProxy))),
@@ -158,6 +158,18 @@ contract CodePresenceSurfacesTest is CTMUpgradeExecutorFixture {
     function _row(address _proxy) internal view returns (ProxyUpgradeRow memory) {
         return
             ProxyUpgradeRow({proxy: _proxy, expectedOldImpl: implOld, implNew: implNew, callInitializeUpgrade: false});
+    }
+
+    /// @dev What a release names, read off its manifest: DiamondInit, genesis upgrade, verifier,
+    ///      every genesis facet.
+    function _releaseMembers(ReleaseManifest memory _m) internal pure returns (address[] memory members) {
+        members = new address[](RELEASE_FIXED_MEMBERS + _m.genesisFacets.length);
+        members[0] = _m.diamondInit;
+        members[1] = _m.genesisUpgrade;
+        members[2] = _m.verifier;
+        for (uint256 i = 0; i < _m.genesisFacets.length; ++i) {
+            members[RELEASE_FIXED_MEMBERS + i] = _m.genesisFacets[i].facet;
+        }
     }
 
     /// @dev Empties `_member`'s code and checks `validate()` refuses it with `_error`, then restores

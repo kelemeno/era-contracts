@@ -17,8 +17,8 @@
 //!    ([`super::provenance::expect_code_identity`])? For the `ChainTypeManager` slot also: does it
 //!    carry the reviewed constructor immutables, which code identity masks ([`verify_ctm_immutables`])?
 //!
-//! Before any of that, every participating row must be a real edge ([`row_shape_errors`]): the
-//! contracts no longer refuse a malformed row, so this is the only place it is caught before the
+//! Before any of that, every participating row must be a real edge ([`row_shape_errors`]). The
+//! row-carrying objects refuse a malformed row at construction too; this reports it before the
 //! vote (`protocol-docs/ecosystem-upgrade.md#where-each-check-lives`).
 
 use alloy::primitives::Address;
@@ -292,7 +292,7 @@ pub(super) async fn verify_inventory<P: Provider>(
     if review.rows.len() != members.len() {
         result.report_error(&format!(
             "the {} inventory has {} slot(s) but the enum has {}: its slots cannot be named, and \
-             no contract refuses it — every row it carries is applied",
+             the object's constructor refuses such an inventory",
             inventory.enum_name(),
             review.rows.len(),
             members.len()
@@ -1268,12 +1268,12 @@ mod tests {
         assert_eq!(result.errors, 1);
     }
 
-    /// An inventory whose length is not the enum's: no contract refuses it any more.
+    /// An inventory whose length is not the enum's.
     #[tokio::test]
     async fn an_inventory_of_the_wrong_length_fails() {
         let result = run(&vec![inert(); 3], &[], None).await;
         assert_eq!(result.errors, 1);
-        assert!(result.has_error("no contract refuses it"));
+        assert!(result.has_error("constructor refuses such an inventory"));
     }
 
     // ───────────────────────── row shape ─────────────────────────

@@ -11,6 +11,7 @@ import {ICTMTransition} from "./registry/objects/ICTMTransition.sol";
 import {CTMUpgradeComposer} from "./registry/libraries/CTMUpgradeComposer.sol";
 import {LiveRoutingReader} from "./registry/libraries/LiveRoutingReader.sol";
 import {L2CanonicalTransaction} from "../common/Messaging.sol";
+import {ZeroAddress} from "../common/L1ContractErrors.sol";
 
 /// @author Matter Labs
 /// @custom:security-contact security@matterlabs.dev
@@ -64,10 +65,15 @@ contract DefaultUpgrade is BaseZkSyncUpgrade, IDefaultUpgrade {
     ///      CTM may already have moved past it.
     function _upgradeFromCommittedObject(ICommittedUpgrade _object) internal {
         (uint256 newProtocolVersion, uint256 upgradeTimestamp, address newRelease) = _object.upgradeTarget();
+        address newVerifier = ICTMRelease(newRelease).verifier();
+        // Checked here, not left to `_upgrade`, which reads zero as "leave unchanged" for genesis.
+        if (newVerifier == address(0)) {
+            revert ZeroAddress();
+        }
         _upgrade({
             _newProtocolVersion: newProtocolVersion,
             _upgradeTimestamp: upgradeTimestamp,
-            _verifier: ICTMRelease(newRelease).verifier(),
+            _verifier: newVerifier,
             _l2ProtocolUpgradeTx: CTMUpgradeComposer.buildL2UpgradeTxFromPlan({
                 _plan: _object.l2Plan(),
                 _newRelease: ICTMRelease(newRelease),

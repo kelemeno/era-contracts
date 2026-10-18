@@ -421,9 +421,11 @@ fn derive_executor_legs(
 ///
 /// Each TOML's `[governance_calls] calls` is one `governanceExecuteCalls` (legacy Governance) or
 /// `governanceExecuteCallsDirect` (PUH) invocation signed by `sender` (the governance owner), so
-/// they merge into one governance Safe bundle. Right after a registry package's bundle runs, the
-/// fork is held against the state it must have left ([`expect_applied`]): the contracts no longer
-/// check their own completion, so a bundle that executes without landing fails the command here.
+/// they merge into one governance Safe bundle. A bootstrap bundle's last call is
+/// `RegistryBootstrapMigration.validateApplied()`, so an incomplete edge reverts the replay
+/// itself. Right after a registry package's bundle runs, the fork is also held against the whole
+/// state it must have left ([`expect_applied`]), so a bundle that executes without landing fails
+/// the command here.
 /// Returns the resolved governance contract address for diagnostics.
 pub async fn replay_governance_calls(
     runner: &mut ForgeRunner,

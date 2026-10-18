@@ -57,6 +57,8 @@ sol! {
         /// The version the edge lands on: its genesis release's own, read at construction.
         function newProtocolVersion() external view returns (uint256);
         function validate() external view;
+        /// The edge's completion check, the bootstrap bundle's last call.
+        function validateApplied() external view;
     }
 
     /// One governance call of a bootstrap edge, as `RegistryBootstrapSequence` derives it.
@@ -180,12 +182,10 @@ sol! {
     }
 
     /// The live owner and outstanding nomination of an `Ownable2Step` lifecycle object.
-    /// `transferOwnership` is declared to ENCODE the bootstrap's ecosystem ProxyAdmin hand-over.
     #[sol(rpc)]
     contract Ownable2StepView {
         function owner() external view returns (address);
         function pendingOwner() external view returns (address);
-        function transferOwnership(address newOwner) external;
     }
 
     /// Positional mirror of `RegistryTypes.GenesisFacet`.

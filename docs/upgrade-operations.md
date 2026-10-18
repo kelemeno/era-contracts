@@ -32,10 +32,11 @@ prepare output's `[ctm_admin_calls].server_notifier_handover`, declared as `admi
 actions, and run by protocol-ops right after the prepares (`UpgradeFull::run_ctm_admin_steps`). Step
 3 is derived only while the notifier is not yet the executor's, so the bootstrap bundle reverts
 until steps 1–2 landed, and step 3 itself reverts unless the CTM executor is the nominee.
-`migrate()` refuses unless the CTM names the manifest's notifier and the notifier serves the CTM,
-and the notifier's row applies only through `ctmProxyAdmin`. `protocol-ops ecosystem
-verify-bootstrap` reports the handover as its own prerequisite, and `ecosystem upgrade-governance`
-checks after its replay that the CTM executor owns the notifier with no nomination outstanding.
+`RegistryBootstrapMigration.validate()` refuses to run unless the manifest's mandatory notifier row
+names the CTM's notifier, the notifier serves the CTM and is owned by the CTM executor with no
+nomination outstanding, and the notifier's row applies only through `ctmProxyAdmin`;
+`validateApplied()` keeps checking the ownership and the binding. `protocol-ops ecosystem
+verify-bootstrap` reports the handover as its own prerequisite.
 
 The handover is not undone if the bootstrap is cancelled afterwards: the notifier then simply
 belongs to the CTM domain early. A recurring prepare has no admin calls.
@@ -49,8 +50,9 @@ same bindings and owned by governance, through the predecessor's `forward`:
 
 - the core domain: `ProxyAdmin.transferOwnership(successor)` on the ecosystem `ProxyAdmin`;
 - a CTM domain: `transferOwnership(successor)` on the CTM, its `ProxyAdmin` and the ServerNotifier;
-  the successor's `acceptCTMOwnership()` (permissionless, gated by the nomination) and a
-  `forward([notifier.acceptOwnership()])` complete the two-step handovers.
+  the successor's `acceptCTMOwnership()` (called by governance, the successor's owner, or by the
+  predecessor in the same `forward`) and a `forward([notifier.acceptOwnership()])` complete the
+  two-step handovers.
 
 Hand over before preparing the next upgrade: the prepares name the executor that holds each domain
 at prepare time (the ecosystem `ProxyAdmin`'s owner, the CTM's owner), and the merge derives the

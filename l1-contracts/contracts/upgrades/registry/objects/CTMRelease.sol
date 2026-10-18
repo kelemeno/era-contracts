@@ -9,6 +9,7 @@ import {ISelfDescribingFacet} from "../../../state-transition/chain-interfaces/I
 import {FixedForceDeploymentsData} from "../../../state-transition/l2-deps/IL2GenesisUpgrade.sol";
 import {
     GenesisBatchHashZero,
+    RegistryDuplicateFacetRow,
     RegistryDuplicateSelector,
     RegistryEmptySelectors,
     RegistryInventoryLengthMismatch,
@@ -21,14 +22,18 @@ import {L2EcosystemContract, L2_ECOSYSTEM_CONTRACT_COUNT} from "../libraries/Con
 /// @notice Storage-backed, write-once description of one CTM release.
 /// @dev A release names its members by ADDRESS. What those addresses run is what governance
 ///      reviewed before approving this object; the contract's own job is to refuse a member
-///      that is not a deployed contract at all, which `validate()` does when the release is
-///      installed.
+///      that is not a deployed contract at all, which `validate()` does before a transition is
+///      built from the release and when a CTM installs it.
 contract CTMRelease is ICTMRelease, ManifestStorage {
     /// @notice Pins the full manifest. There is NO state-mutating function on this contract: the
     ///         manifest is written once, at construction, so write-once is structural rather than a
     ///         runtime guard and `manifestHash` can never describe a stale object.
     constructor(ReleaseManifest memory _manifest) ManifestStorage(abi.encode(_manifest)) {
-        if (_manifest.verifier == address(0)) {
+        if (
+            _manifest.diamondInit == address(0) ||
+            _manifest.genesisUpgrade == address(0) ||
+            _manifest.verifier == address(0)
+        ) {
             revert ZeroAddress();
         }
         // Batch zero of every chain created from this release commits to it, and nothing else on
@@ -39,12 +44,14 @@ contract CTMRelease is ICTMRelease, ManifestStorage {
 
         // Code existence is deliberately NOT checked here: a release may legitimately be
         // constructed in the same transaction that deploys its members, and `validate()` holds
-        // the requirement when the release is installed, which is where it is actually needed.
+        // the requirement before a transition is built from the release and when a CTM installs
+        // it, which is where it is actually needed.
         // The one facet-set check kept: an empty set would describe an unusable chain and derive
         // a remove-everything delta in any transition departing toward it.
         if (_manifest.genesisFacets.length == 0) {
             revert RegistryEmptySelectors(address(0));
         }
+        _requireUniqueFacetRows(_manifest.genesisFacets);
         // The L2 table is an enum-indexed inventory: the length check makes every slot an
         // explicit statement (content is governance-reviewed data, like the rest of the
         // manifest). Checked against the count at THIS release's construction — later enum
@@ -104,8 +111,10 @@ contract CTMRelease is ICTMRelease, ManifestStorage {
         bytes4[][] memory routing = new bytes4[][](facetsLength);
         for (uint256 i = 0; i < facetsLength; ++i) {
             address facet = m.genesisFacets[i].facet;
-            // A codeless facet reverts here without data. A facet repeated in two rows repeats
-            // its selectors, which `_requireNoDuplicateSelectors` refuses.
+            // Not merely defensive: the facets are the one member set this contract READS
+            // through (`ISelfDescribingFacet.selectors()`), and a codeless target answers that
+            // read with an empty revert instead of a usable failure.
+            ObjectAnchorLib.requireCode(facet);
             routing[i] = ISelfDescribingFacet(facet).selectors();
             // A selector-less row would reach the installing paths (`DiamondInit`, the bootstrap
             // engine) as an empty `Add` cut, which `Diamond.diamondCut` rejects on every chain.
@@ -152,6 +161,25 @@ contract CTMRelease is ICTMRelease, ManifestStorage {
         bytes memory expected = row.length == 0 ? bytes("") : abi.encode(row, _shell);
         if (keccak256(_field) != keccak256(expected)) {
             revert ReleaseForceDeploymentMismatch(uint256(_member));
+        }
+    }
+
+    /// @dev One row per facet address. A repeated address describes a routing no diamond can hold
+    ///      (`Diamond.diamondCut` would re-add selectors already routed). Checked at construction,
+    ///      against a mistake in an authored manifest; `validate()` refuses the same repetition
+    ///      through the selectors it repeats ({_requireNoDuplicateSelectors}).
+    function _requireUniqueFacetRows(GenesisFacet[] memory _facets) private pure {
+        uint256 length = _facets.length;
+        for (uint256 i = 0; i < length; ++i) {
+            address facet = _facets[i].facet;
+            if (facet == address(0)) {
+                continue;
+            }
+            for (uint256 j = 0; j < i; ++j) {
+                if (_facets[j].facet == facet) {
+                    revert RegistryDuplicateFacetRow(facet);
+                }
+            }
         }
     }
 

@@ -1,7 +1,8 @@
 //! What a registry package must have left behind once its governance bundle ran, read from the
-//! fork `ecosystem upgrade-governance` replayed it on. The contracts no longer assert their own
-//! completion, so a bundle that executed but did not land is caught here
-//! (`protocol-docs/ecosystem-upgrade.md#where-each-check-lives`).
+//! fork `ecosystem upgrade-governance` replayed it on. The contracts assert part of it themselves
+//! (the bootstrap's `validateApplied()`, the CTM executor's check of its own commit); this holds
+//! the whole post-state a second time, so a bundle that executed but did not land is caught here
+//! too (`protocol-docs/ecosystem-upgrade.md#where-each-check-lives`).
 
 use alloy::primitives::Address;
 use alloy::providers::Provider;
@@ -1037,7 +1038,7 @@ mod tests {
             .answer("coreRow.implementation", NEW)
     }
 
-    /// boot-49..55: what `validateApplied` asserted on chain, read after the replay instead.
+    /// boot-49..55: what `validateApplied` asserts on chain, read again after the replay.
     #[tokio::test]
     async fn a_bootstrap_that_did_not_land_fails() {
         let r = bootstrap_reads;

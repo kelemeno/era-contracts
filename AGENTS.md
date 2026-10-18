@@ -68,6 +68,16 @@ address result = _tryAddress(target, "someFunction()");
 - They mask initialization issues and timing problems
 - The codebase should fail fast and clearly, not silently return defaults
 
+**SCOPE:**
+
+- The rule stops our own code from hiding failures of our own contracts and scripts.
+- It does not forbid protocol code that probes arbitrary third-party contracts where "unsupported"
+  is a valid, specified answer (for example a base token without `name()`/`symbol()` or one
+  returning `bytes32`, where a typed call would make the chain impossible to create or upgrade).
+- Never remove or rewrite an existing try/catch or `staticcall` in protocol contracts to satisfy
+  this rule, because that changes protocol behaviour; raise it with the PR owner.
+- A new use needs the owner's approval and a comment naming the "unsupported" answer it handles.
+
 ### NEVER Override Storage Slots in Tests
 
 **THIS IS AN ABSOLUTE RULE - NO EXCEPTIONS**

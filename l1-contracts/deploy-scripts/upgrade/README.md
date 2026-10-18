@@ -156,7 +156,8 @@ replays the governance bundle of `<env-out>/ecosystem.toml` on a fork as governa
 the fork is left in the state the package describes
 ([where each check lives](../../../protocol-docs/ecosystem-upgrade.md#where-each-check-lives)), and
 emits the governance Safe bundle; `ecosystem governance-toml-to-simulator` emits the transaction-simulator JSON. On the
-bootstrap edge the bundle ends with `RegistryBootstrapMigration.migrate()`.
+bootstrap edge the bundle ends with the edge's completion check
+(`RegistryBootstrapMigration.validateApplied()`), so the replay itself reverts unless the edge completed.
 Monitoring and recovery: the [operations document](../../../docs/upgrade-operations.md).
 
 ## Emergency execution
@@ -218,6 +219,19 @@ Who may trigger the crossing and when is `CTMUpgradeExecutor.upgradeChain`'s pol
 document, "Flow: upgrading"). `chain set-upgrade-timestamp` schedules it on the ServerNotifier
 ({protocol-docs/upgrade-scheduling.md}); `chain set-da-validator-pair` restores the DA pair the
 upgrade resets.
+
+On the v35 bootstrap edge `upgradeChain` does not apply: the departing version has no transition.
+A chain's admin crosses it with the migration's `upgradeCut()`, and governance can cross a chain
+itself with `ChainTypeManager.upgradeChainFromVersion(chainId, oldVersion, cut)` through
+`CTMUpgradeExecutor.forward`, a passthrough kept only until no chain can depart a pre-v35 version.
+
+**Chain admins behind an `AccessControlRestriction`.** Every crossing after the bootstrap edge calls
+the chain's two-argument `upgradeChainFromVersion(address,uint256)` (`0x03129ad9`) instead of the
+cut-taking `upgradeChainFromVersion(address,uint256,DiamondCutData)` (`0x3b6d7534`). A role the
+restriction requires for the old selector does not carry over: before the chain's first crossing
+after v35, the restriction's default admin sets it for the new one
+(`setRequiredRoleForCall(chainAddress, 0x03129ad9, role)`); until then only the default admin can
+send the crossing.
 
 Server and monitoring consumers must read the final transaction through
 `transition.l2UpgradeTx(bridgehub, chainId)` or `bootstrap.l2UpgradeTx(chainId)`. These views

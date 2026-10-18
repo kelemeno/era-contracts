@@ -68,7 +68,7 @@ contract ChainTypeManagerLegacyStorageTest is ChainTypeManagerTest {
             address(bridgehub),
             interopCenterAddress,
             address(bytecodesSupplier),
-            address(0),
+            address(permissionlessValidator),
             address(0)
         );
     }

@@ -9,7 +9,9 @@ import {IProxyUpgradeTransition} from "../objects/IProxyUpgradeTransition.sol";
 import {ICTMUpgradeExecutor} from "./ICTMUpgradeExecutor.sol";
 import {UpgradeExecutorBase} from "../../../governance/UpgradeExecutorBase.sol";
 import {IChainTypeManager} from "../../../state-transition/IChainTypeManager.sol";
-import {TransitionNotCommitted, UpgradeNotPermissionlessYet} from "../../../common/L1ContractErrors.sol";
+import {TransitionNotCommitted, Unauthorized, ZeroAddress} from "../../../common/L1ContractErrors.sol";
+import {OutdatedProtocolVersion} from "../../../state-transition/L1StateTransitionErrors.sol";
+import {ObjectAnchorLib} from "../libraries/ObjectAnchorLib.sol";
 import {ProxyUpgradeRowLib} from "../libraries/ProxyUpgradeRowLib.sol";
 import {ProxyUpgradeDomain} from "../RegistryTypes.sol";
 
@@ -25,6 +27,8 @@ import {ProxyUpgradeDomain} from "../RegistryTypes.sol";
 ///      a chain, moving a deadline, replacing a committed transition, ...) goes through the
 ///      owner-gated, event-logged `forward`.
 contract CTMUpgradeExecutor is UpgradeExecutorBase, ICTMUpgradeExecutor {
+    using ObjectAnchorLib for address;
+
     /// @notice The one ChainTypeManager this executor governs. Transitions carry no CTM pointer;
     ///         the binding is this immutable, so a transition cannot be aimed at a foreign CTM
     ///         through this executor.
@@ -34,20 +38,25 @@ contract CTMUpgradeExecutor is UpgradeExecutorBase, ICTMUpgradeExecutor {
     ///         per-CTM proxies under the CTM's own administration. Owned by this executor.
     ProxyAdmin public immutable CTM_PROXY_ADMIN;
 
-    /// @dev The bindings are review-time facts, checked off-chain against the reviewed CTM and
-    ///      ProxyAdmin; see {protocol-docs/ecosystem-upgrade.md#where-each-check-lives}.
     constructor(
         address _initialOwner,
         IChainTypeManager _ctm,
         ProxyAdmin _ctmProxyAdmin
     ) UpgradeExecutorBase(_initialOwner) {
+        if (address(_ctm) == address(0) || address(_ctmProxyAdmin) == address(0)) {
+            revert ZeroAddress();
+        }
         CHAIN_TYPE_MANAGER = _ctm;
         CTM_PROXY_ADMIN = _ctmProxyAdmin;
     }
 
     /// @inheritdoc ICTMUpgradeExecutor
     function acceptCTMOwnership() external {
-        Ownable2Step(address(CHAIN_TYPE_MANAGER)).acceptOwnership();
+        Ownable2Step ctm = Ownable2Step(address(CHAIN_TYPE_MANAGER));
+        if (msg.sender != owner() && msg.sender != ctm.owner()) {
+            revert Unauthorized(msg.sender);
+        }
+        ctm.acceptOwnership();
     }
 
     /// @inheritdoc ICTMUpgradeExecutor
@@ -57,8 +66,10 @@ contract CTMUpgradeExecutor is UpgradeExecutorBase, ICTMUpgradeExecutor {
     }
 
     /// @inheritdoc ICTMUpgradeExecutor
-    /// @dev Every check lives in the CTM, so a commit sent through `forward` gets the same ones.
+    /// @dev The commit's checks live in the CTM, so a commit sent through `forward` gets the same
+    ///      ones.
     function applyCTMUpgrade(ICTMTransition _transition) external onlyOwner {
+        address(_transition).requireCode();
         // One argument, not four plus a cut: the CTM reads the version edge, the schedule, the cut
         // and the release it installs from the same pinned object, so they cannot be passed
         // inconsistently.
@@ -68,17 +79,15 @@ contract CTMUpgradeExecutor is UpgradeExecutorBase, ICTMUpgradeExecutor {
             _transition.oldProtocolVersion(),
             _transition.newProtocolVersion()
         );
+        _requireTransitionApplied(_transition);
     }
 
     /// @inheritdoc ICTMUpgradeExecutor
     function upgradeChain(ICTMTransition _transition, uint256 _chainId) external {
-        uint256 oldProtocolVersion = _transition.oldProtocolVersion();
         if (msg.sender != owner() && msg.sender != CHAIN_TYPE_MANAGER.getChainAdmin(_chainId)) {
-            uint256 deadline = CHAIN_TYPE_MANAGER.protocolVersionDeadline(oldProtocolVersion);
-            if (block.timestamp <= deadline) {
-                revert UpgradeNotPermissionlessYet(deadline);
-            }
+            revert Unauthorized(msg.sender);
         }
+        uint256 oldProtocolVersion = _transition.oldProtocolVersion();
         // The chain executes the cut its own CTM committed, so `_transition` must BE that
         // transition — otherwise the argument would name one edge while a different one ran.
         address committed = CHAIN_TYPE_MANAGER.upgradeTransition(oldProtocolVersion);
@@ -89,5 +98,19 @@ contract CTMUpgradeExecutor is UpgradeExecutorBase, ICTMUpgradeExecutor {
         // it committed it, and that code cannot have gone since.
         CHAIN_TYPE_MANAGER.upgradeChainFromVersion(_chainId, oldProtocolVersion);
         emit ChainUpgradeApplied(_chainId, _transition.newProtocolVersion());
+    }
+
+    function _requireTransitionApplied(ICTMTransition _transition) private view {
+        uint256 oldProtocolVersion = _transition.oldProtocolVersion();
+        address committed = CHAIN_TYPE_MANAGER.upgradeTransition(oldProtocolVersion);
+        if (committed != address(_transition)) {
+            revert TransitionNotCommitted(address(_transition), committed);
+        }
+        uint256 newProtocolVersion = _transition.newProtocolVersion();
+        uint256 currentProtocolVersion = CHAIN_TYPE_MANAGER.protocolVersion();
+        // Defense in depth: a committed edge's target is never ahead of `protocolVersion`.
+        if (currentProtocolVersion < newProtocolVersion) {
+            revert OutdatedProtocolVersion(currentProtocolVersion, newProtocolVersion);
+        }
     }
 }

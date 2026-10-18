@@ -64,7 +64,8 @@ interface ICTMTransition is ICommittedUpgrade, IManifestHash {
 
     /// @notice Reverts unless every contract this transition names itself (engine, composer) is
     ///         deployed code. `ChainTypeManager` calls it whenever it commits a transition, first
-    ///         or as a replacement; the releases are checked where they are installed.
+    ///         or as a replacement; the releases are validated at the transition's construction and
+    ///         where they are installed.
     /// @dev It does NOT attest that the code is the reviewed code — that is governance's
     ///      approval of this object's member ADDRESSES, established off-chain before approval
     ///      (see {docs/registry-driven-upgrades.md}).

@@ -27,7 +27,6 @@ import {ProxyUpgradeRowLib} from "contracts/upgrades/registry/libraries/ProxyUpg
 import {ServerNotifier} from "contracts/governance/ServerNotifier.sol";
 import {IBootstrapUpgrade} from "contracts/upgrades/IBootstrapUpgrade.sol";
 import {L2PlanFixtures} from "./L2PlanFixtures.sol";
-import {RegistryPostState} from "./RegistryPostState.sol";
 import {L2GenesisForceDeploymentsHelper} from "contracts/l2-upgrades/L2GenesisForceDeploymentsHelper.sol";
 
 import {Diamond} from "contracts/state-transition/libraries/Diamond.sol";
@@ -51,8 +50,12 @@ import {
     L2_FORCE_DEPLOYER_ADDR
 } from "contracts/common/l2-helpers/L2ContractAddresses.sol";
 import {
+    BootstrapAlreadyExecuted,
+    BootstrapAuthorityNotHeld,
+    BootstrapExecutorNotBound,
     BootstrapExecutorOwnerMismatch,
     BootstrapNominationPending,
+    BootstrapNotYetExecuted,
     BootstrapServerNotifierNotBound,
     BootstrapServerNotifierRowMissing,
     L2BytecodeNotPublished,
@@ -63,7 +66,9 @@ import {
     ProxyUpgradeRowMismatch,
     RegistryDuplicateSelector,
     RegistryEmptySelectors,
+    RegistryInventoryLengthMismatch,
     RegistryTargetHasNoCode,
+    RegistryDuplicateProxyRow,
     TransitionDeadlineBeforeUpgrade,
     TransitionDeadlineZero,
     ZeroAddress
@@ -118,7 +123,7 @@ contract ImplUnknown {
 /// @dev Driven against a REAL `ChainTypeManager` and a real OpenZeppelin `ProxyAdmin` — the two
 ///      contracts whose ownership the migration actually needs — rather than mocks, because the
 ///      property under test IS the authority movement.
-contract RegistryBootstrapMigrationTest is ChainTypeManagerTest, RegistryPostState {
+contract RegistryBootstrapMigrationTest is ChainTypeManagerTest {
     RegistryBootstrapMigration internal migration;
     CTMUpgradeExecutor internal ctmExecutor;
     CoreUpgradeExecutor internal coreExecutor;
@@ -478,9 +483,9 @@ contract RegistryBootstrapMigrationTest is ChainTypeManagerTest, RegistryPostSta
         migration.migrate();
         _assertBootstrappedEventEmitted();
 
-        // The edge's post-state (version, release pin, authority landing); the granular asserts
-        // below then pin the exact expected values.
-        _assertBootstrapApplied(migration);
+        // The object's own post-state check covers the whole edge (version, release pin, authority
+        // landing); the granular asserts below then pin the exact expected values.
+        migration.validateApplied();
 
         // The ecosystem proxy moved to the implementation the row names.
         assertEq(
@@ -520,17 +525,12 @@ contract RegistryBootstrapMigrationTest is ChainTypeManagerTest, RegistryPostSta
         );
     }
 
-    /// @dev No flag check of its own (boot-45): a replay finds the CTM owned by its executor, and
-    ///      the commit's `onlyOwner` refuses it.
     function test_migrate_isOneShot() public {
         _handOverAuthority();
         migration.migrate();
-        uint256 version = chainContractAddress.protocolVersion();
 
-        vm.expectRevert("Ownable: caller is not the owner");
+        vm.expectRevert(BootstrapAlreadyExecuted.selector);
         migration.migrate();
-        assertEq(chainContractAddress.protocolVersion(), version, "a replay moves nothing");
-        assertEq(chainContractAddress.owner(), address(ctmExecutor), "nor the CTM's owner");
     }
 
     // ─────────────────────────────── composed payload ───────────────────────────────
@@ -625,7 +625,7 @@ contract RegistryBootstrapMigrationTest is ChainTypeManagerTest, RegistryPostSta
         );
         assertEq(chainContractAddress.currentRelease(), address(tableRelease), "the table release is pinned");
         assertEq(chainContractAddress.protocolVersion(), newVersion);
-        _assertBootstrapApplied(composed);
+        composed.validateApplied();
     }
 
     /// @dev What the delegate is called WITH is defined by the pinned composer, asked with the
@@ -795,26 +795,103 @@ contract RegistryBootstrapMigrationTest is ChainTypeManagerTest, RegistryPostSta
         assertTrue(gated.executed(), "the same edge applies once the bytecode is published");
         assertEq(chainContractAddress.protocolVersion(), newVersion);
         assertEq(chainContractAddress.upgradeCutHash(oldVersion), composedCutHash, "publication changes no bytes");
-        _assertBootstrapApplied(gated);
+        gated.validateApplied();
+    }
+
+    // ─────────────────────────── post-state verification ───────────────────────────
+
+    /// @dev The completion check closes the bundle: before the edge it must fail loudly, so an
+    ///      incorrectly sequenced bundle cannot report success on an unapplied bootstrap.
+    function test_revertWhen_validateAppliedBeforeMigrate() public {
+        vm.expectRevert(BootstrapNotYetExecuted.selector);
+        migration.validateApplied();
+    }
+
+    /// @dev A `transferOwnership` appended to the bundle beside the derived calls is invisible to
+    ///      the owner checks (`owner()` does not move until the nominee accepts) and lets the
+    ///      nominee take the domain the moment the gate has passed. The gate refuses a pending
+    ///      nomination on every `Ownable2Step` authority the edge lands on or drives, and reopens
+    ///      once it is withdrawn. The `ProxyAdmin`s are plain `Ownable` and cannot be nominated.
+    function test_revertWhen_validateAppliedWithANominationPendingOnAnAuthority() public {
+        _handOverAuthority();
+        migration.migrate();
+        migration.validateApplied();
+        address attacker = makeAddr("attacker");
+
+        // Both executors are governance-owned: the nomination is governance's own call.
+        Ownable2Step[2] memory governed = [Ownable2Step(address(ctmExecutor)), Ownable2Step(address(coreExecutor))];
+        for (uint256 i = 0; i < governed.length; ++i) {
+            vm.prank(governor);
+            governed[i].transferOwnership(attacker);
+            assertEq(governed[i].owner(), governor, "the owner has not moved, which is what hides the nomination");
+            vm.expectRevert(
+                abi.encodeWithSelector(BootstrapNominationPending.selector, address(governed[i]), attacker)
+            );
+            migration.validateApplied();
+
+            vm.prank(governor);
+            governed[i].transferOwnership(address(0));
+            migration.validateApplied();
+        }
+
+        // The CTM is the executor's after the edge, so a nomination reaches it through the
+        // executor's raw-call hatch — the one way an appended call could.
+        Call[] memory calls = new Call[](1);
+        calls[0] = Call({
+            target: address(chainContractAddress),
+            value: 0,
+            data: abi.encodeCall(Ownable2Step.transferOwnership, (attacker))
+        });
+        vm.prank(governor);
+        ctmExecutor.forward(calls);
+        assertEq(chainContractAddress.owner(), address(ctmExecutor));
+        vm.expectRevert(
+            abi.encodeWithSelector(BootstrapNominationPending.selector, address(chainContractAddress), attacker)
+        );
+        migration.validateApplied();
+
+        calls[0].data = abi.encodeCall(Ownable2Step.transferOwnership, (address(0)));
+        vm.prank(governor);
+        ctmExecutor.forward(calls);
+        migration.validateApplied();
+
+        // The notifier is the executor's too, so the same hatch reaches it.
+        calls[0] = Call({
+            target: address(notifierProxy),
+            value: 0,
+            data: abi.encodeCall(Ownable2Step.transferOwnership, (attacker))
+        });
+        vm.prank(governor);
+        ctmExecutor.forward(calls);
+        vm.expectRevert(abi.encodeWithSelector(BootstrapNominationPending.selector, address(notifierProxy), attacker));
+        migration.validateApplied();
+
+        calls[0].data = abi.encodeCall(Ownable2Step.transferOwnership, (address(0)));
+        vm.prank(governor);
+        ctmExecutor.forward(calls);
+        migration.validateApplied();
     }
 
     // ─────────────────────────── source checks ───────────────────────────
 
-    /// @dev No ownership check of its own (boot-20/21): without the authority the first
-    ///      owner-gated step — the CTM-domain row swap — refuses, and nothing moves.
     function test_revertWhen_authorityNotHandedOver() public {
-        vm.expectRevert("Ownable: caller is not the owner");
+        // Without ownership the migration could not perform any of the work; it must say so rather
+        // than fail deep inside a proxy call.
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                BootstrapAuthorityNotHeld.selector,
+                address(chainContractAddress),
+                chainContractAddress.owner()
+            )
+        );
         migration.migrate();
-        assertFalse(migration.executed(), "a refused edge must stay unspent");
-        assertEq(_liveImpl(ctmProxyAdmin, ctmDomainProxy), implV31, "no row is applied");
     }
 
     // ─────────────────────────── executor binding ───────────────────────────
 
-    /// @dev Which CTM and ProxyAdmin an executor is bound to is a review-time fact protocol-ops
-    ///      checks (`lifecycle::verify_ctm_executor_construction`; boot-25/26). On chain, an executor
-    ///      bound to another CTM cannot complete the handover: its accept targets that CTM, and the
-    ///      whole edge reverts.
+    /// @dev The executors receive ALL the authority this edge moves, so a manifest naming one that
+    ///      is bound elsewhere must be refused BEFORE the one-shot edge is spent — otherwise the
+    ///      handover completes into an executor whose fixed entrypoints cannot drive what it owns.
     function test_revertWhen_ctmExecutorIsBoundToAnotherCtm() public {
         address foreignCtm = makeAddr("foreignCtm");
         CTMUpgradeExecutor foreignExecutor = new CTMUpgradeExecutor(
@@ -830,17 +907,19 @@ contract RegistryBootstrapMigrationTest is ChainTypeManagerTest, RegistryPostSta
         chainContractAddress.transferOwnership(address(mismatched));
         ctmProxyAdmin.transferOwnership(address(mismatched));
 
-        vm.expectRevert(bytes(""));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                BootstrapExecutorNotBound.selector,
+                address(foreignExecutor),
+                address(chainContractAddress),
+                foreignCtm
+            )
+        );
         mismatched.migrate();
         assertFalse(mismatched.executed(), "a refused edge must stay unspent");
-        assertEq(chainContractAddress.owner(), governor, "the CTM stays where it was");
     }
 
-    /// @dev An executor bound to another ProxyAdmin is NOT refused on chain: the edge completes,
-    ///      handing the CTM-domain ProxyAdmin to an executor whose infrastructure leg applies through
-    ///      a different one. Only the review catches it (protocol-ops lifecycle construction); this
-    ///      pins that the contracts no longer pretend to.
-    function test_theExecutorsProxyAdminBindingIsAReviewTimeFact() public {
+    function test_revertWhen_ctmExecutorIsBoundToAnotherProxyAdmin() public {
         ProxyAdmin foreignProxyAdmin = new ProxyAdmin();
         CTMUpgradeExecutor foreignExecutor = new CTMUpgradeExecutor(
             governor,
@@ -855,9 +934,15 @@ contract RegistryBootstrapMigrationTest is ChainTypeManagerTest, RegistryPostSta
         chainContractAddress.transferOwnership(address(mismatched));
         ctmProxyAdmin.transferOwnership(address(mismatched));
 
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                BootstrapExecutorNotBound.selector,
+                address(foreignExecutor),
+                address(ctmProxyAdmin),
+                address(foreignProxyAdmin)
+            )
+        );
         mismatched.migrate();
-        assertEq(ctmProxyAdmin.owner(), address(foreignExecutor), "the domain's admin went to the executor");
-        assertEq(address(foreignExecutor.CTM_PROXY_ADMIN()), address(foreignProxyAdmin), "which applies elsewhere");
     }
 
     /// @dev The executor's OWNERSHIP is storage, so the reviewed deployment does not settle it.
@@ -927,17 +1012,15 @@ contract RegistryBootstrapMigrationTest is ChainTypeManagerTest, RegistryPostSta
         ctmExecutor.acceptOwnership();
         migration.migrate();
         assertTrue(migration.executed(), "the corrected edge must run");
-        _assertBootstrapApplied(migration);
+        migration.validateApplied();
     }
 
-    /// @dev No code check of its own (boot-22): the executor's `owner()` read fails to decode.
     function test_revertWhen_executorHasNoCode() public {
         vm.etch(address(ctmExecutor), "");
         _handOverAuthority();
 
-        vm.expectRevert(bytes(""));
+        vm.expectRevert(abi.encodeWithSelector(RegistryTargetHasNoCode.selector, address(ctmExecutor)));
         migration.migrate();
-        assertFalse(migration.executed(), "a refused edge must stay unspent");
     }
 
     // ─────────────────────────── engine and composer code ───────────────────────────
@@ -983,6 +1066,41 @@ contract RegistryBootstrapMigrationTest is ChainTypeManagerTest, RegistryPostSta
         new RegistryBootstrapMigration(manifest);
     }
 
+    function test_revertWhen_manifestNamesAZeroAddress() public {
+        BootstrapManifest[] memory manifests = new BootstrapManifest[](6);
+        for (uint256 i = 0; i < manifests.length; ++i) {
+            manifests[i] = _manifest();
+        }
+        manifests[0].ctm = address(0);
+        manifests[1].ctmProxyAdmin = ProxyAdmin(address(0));
+        manifests[2].currentRelease = address(0);
+        manifests[3].ctmExecutor = address(0);
+        manifests[4].coreExecutor = address(0);
+        manifests[5].governance = address(0);
+        for (uint256 i = 0; i < manifests.length; ++i) {
+            vm.expectRevert(ZeroAddress.selector);
+            new RegistryBootstrapMigration(manifests[i]);
+        }
+    }
+
+    /// @dev The CTM inventory has exactly one slot per `CTMContract` member, which is also what makes
+    ///      the mandatory ServerNotifier slot addressable.
+    function test_revertWhen_manifestInventoryHasTheWrongLength() public {
+        uint256[2] memory lengths = [CTM_CONTRACT_COUNT - 1, CTM_CONTRACT_COUNT + 1];
+        for (uint256 k = 0; k < lengths.length; ++k) {
+            BootstrapManifest memory manifest = _manifest();
+            ProxyUpgradeRow[] memory resized = new ProxyUpgradeRow[](lengths[k]);
+            for (uint256 i = 0; i < resized.length && i < CTM_CONTRACT_COUNT; ++i) {
+                resized[i] = manifest.ctmProxyUpgrades[i];
+            }
+            manifest.ctmProxyUpgrades = resized;
+            vm.expectRevert(
+                abi.encodeWithSelector(RegistryInventoryLengthMismatch.selector, CTM_CONTRACT_COUNT, lengths[k])
+            );
+            new RegistryBootstrapMigration(manifest);
+        }
+    }
+
     /// @dev Two rows for one proxy would BOTH pass the source check (they compare against the same
     ///      pre-migration implementation) and the last would silently win — so the reviewed edge
     ///      and the executed edge would differ. Same rule {ProxyUpgradeTransition} enforces.
@@ -1013,37 +1131,26 @@ contract RegistryBootstrapMigrationTest is ChainTypeManagerTest, RegistryPostSta
         );
     }
 
-    /// @dev The row shape is a review-time fact protocol-ops checks; the object pins it. On chain a
-    ///      second slot naming the same proxy toward another target finds the proxy already moved by
-    ///      the first, and the edge reverts (boot-47). Slots apply in enum order: the timelock's
-    ///      slot comes first.
     function test_revertWhen_manifestCarriesDuplicateProxyRows() public {
         BootstrapManifest memory manifest = _manifest();
+        // A second slot pointing at the same proxy, with a different target.
         manifest.ctmProxyUpgrades[uint256(CTMContract.ValidatorTimelock)] = ProxyUpgradeRow({
             proxy: address(ctmDomainProxy),
             expectedOldImpl: implV31,
             implNew: implUnknown,
             callInitializeUpgrade: false
         });
-        RegistryBootstrapMigration duplicate = _deployAndAuthorize(manifest);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(ProxyUpgradeRowMismatch.selector, address(ctmDomainProxy), implV31, implUnknown)
-        );
-        duplicate.migrate();
-        assertFalse(duplicate.executed(), "a refused edge must stay unspent");
+        vm.expectRevert(abi.encodeWithSelector(RegistryDuplicateProxyRow.selector, address(ctmDomainProxy)));
+        new RegistryBootstrapMigration(manifest);
     }
 
-    /// @dev A zero source never matches a live implementation (boot-06).
     function test_revertWhen_manifestCarriesAZeroRowField() public {
         BootstrapManifest memory manifest = _manifest();
         manifest.ctmProxyUpgrades[uint256(CTMContract.ChainTypeManager)].expectedOldImpl = address(0);
-        RegistryBootstrapMigration zeroSource = _deployAndAuthorize(manifest);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(ProxyUpgradeRowMismatch.selector, address(ctmDomainProxy), address(0), implV31)
-        );
-        zeroSource.migrate();
+        vm.expectRevert(ZeroAddress.selector);
+        new RegistryBootstrapMigration(manifest);
     }
 
     // ─────────────────────────── L2 plan shape ───────────────────────────
@@ -1127,6 +1234,8 @@ contract RegistryBootstrapMigrationTest is ChainTypeManagerTest, RegistryPostSta
         chainContractAddress.transferOwnership(address(staleMigration));
         ctmProxyAdmin.transferOwnership(address(staleMigration));
 
+        // Refused before any row moves, not by the CTM's own version check after the swaps.
+        vm.expectCall(address(ctmProxyAdmin), abi.encodeWithSelector(ProxyAdmin.upgrade.selector), 0);
         vm.expectRevert(
             abi.encodeWithSelector(
                 OutdatedProtocolVersion.selector,
@@ -1135,6 +1244,8 @@ contract RegistryBootstrapMigrationTest is ChainTypeManagerTest, RegistryPostSta
             )
         );
         staleMigration.migrate();
+        assertFalse(staleMigration.executed(), "a refused edge must stay unspent");
+        assertEq(_liveImpl(ctmProxyAdmin, ctmDomainProxy), implV31, "no row is applied");
     }
 
     function test_revertWhen_proxyIsNotAtTheExpectedImplementation() public {
@@ -1173,24 +1284,25 @@ contract RegistryBootstrapMigrationTest is ChainTypeManagerTest, RegistryPostSta
         );
         assertEq(_liveImpl(ctmProxyAdmin, ctmDomainProxy), implV32);
         assertEq(chainContractAddress.protocolVersion(), newVersion, "the edge must otherwise complete");
-        _assertBootstrapApplied(migration);
+        migration.validateApplied();
     }
 
     // ─────────────────────────── the core side of the handover ───────────────────────────
 
-    /// @dev The ecosystem `ProxyAdmin` handover is part of the bundle's order, which the sequence
-    ///      derives and protocol-ops verifies (boot-31); the CTM-domain edge itself does not depend
-    ///      on it.
-    function test_theEcosystemHandoverIsNotTheEdgesPrecondition() public {
+    /// @dev The ecosystem `ProxyAdmin` is handed to the core executor earlier in the bundle; the
+    ///      edge refuses unless that handover happened, which reverts the handover with it.
+    function test_revertWhen_ecosystemProxyAdminNotHandedToTheCoreExecutor() public {
         _forwardFromCoreExecutor(
             address(ecosystemProxyAdmin),
             abi.encodeCall(Ownable.transferOwnership, (address(this)))
         );
         _handOverAuthority();
 
+        vm.expectRevert(
+            abi.encodeWithSelector(BootstrapAuthorityNotHeld.selector, address(ecosystemProxyAdmin), address(this))
+        );
         migration.migrate();
-        assertTrue(migration.executed());
-        assertEq(ecosystemProxyAdmin.owner(), address(this), "the ecosystem admin is untouched by the edge");
+        assertFalse(migration.executed(), "a refused edge must stay unspent");
     }
 
     function test_revertWhen_coreExecutorIsOwnedBySomeoneElse() public {
@@ -1217,6 +1329,52 @@ contract RegistryBootstrapMigrationTest is ChainTypeManagerTest, RegistryPostSta
         migration.migrate();
     }
 
+    /// @dev Completion checks owner IDENTITY, not only the absence of a nomination: an executor
+    ///      whose ownership already moved fails the gate.
+    function test_revertWhen_validateAppliedAfterAnExecutorChangedOwner() public {
+        _handOverAuthority();
+        migration.migrate();
+        migration.validateApplied();
+        address stranger = makeAddr("stranger");
+
+        Ownable2Step[2] memory governed = [Ownable2Step(address(ctmExecutor)), Ownable2Step(address(coreExecutor))];
+        for (uint256 i = 0; i < governed.length; ++i) {
+            vm.prank(governor);
+            governed[i].transferOwnership(stranger);
+            vm.prank(stranger);
+            governed[i].acceptOwnership();
+            vm.expectRevert(
+                abi.encodeWithSelector(
+                    BootstrapExecutorOwnerMismatch.selector,
+                    address(governed[i]),
+                    governor,
+                    stranger
+                )
+            );
+            migration.validateApplied();
+
+            vm.prank(stranger);
+            governed[i].transferOwnership(governor);
+            vm.prank(governor);
+            governed[i].acceptOwnership();
+            migration.validateApplied();
+        }
+    }
+
+    /// @dev ... and the core side's authority.
+    function test_revertWhen_validateAppliedAfterTheCoreSideMoved() public {
+        _handOverAuthority();
+        migration.migrate();
+        migration.validateApplied();
+
+        address stranger = makeAddr("stranger");
+        _forwardFromCoreExecutor(address(ecosystemProxyAdmin), abi.encodeCall(Ownable.transferOwnership, (stranger)));
+        vm.expectRevert(
+            abi.encodeWithSelector(BootstrapAuthorityNotHeld.selector, address(ecosystemProxyAdmin), stranger)
+        );
+        migration.validateApplied();
+    }
+
     /// @dev Governance's raw call through the core executor, which owns the ecosystem admin.
     function _forwardFromCoreExecutor(address _target, bytes memory _data) internal {
         Call[] memory calls = new Call[](1);
@@ -1235,39 +1393,36 @@ contract RegistryBootstrapMigrationTest is ChainTypeManagerTest, RegistryPostSta
         new RegistryBootstrapMigration(manifest);
     }
 
-    /// @dev Nothing of the handover happened: the notifier is still under its old ProxyAdmin, so its
-    ///      row cannot be read through the CTM-domain one and the edge reverts in `applyRows` —
-    ///      even though the ChainAdmin already put the new implementation in place itself.
+    /// @dev Nothing of the handover happened: the ChainAdmin still owns the notifier. Refused even
+    ///      though the ChainAdmin already put the new implementation in place itself — the edge is
+    ///      about authority, not the implementation.
     function test_revertWhen_notifierNotHandedOver_evenIfItsImplementationIsAlreadyNew() public {
         (BootstrapManifest memory manifest, TransparentUpgradeableProxy fresh) = _manifestWithFreshNotifier();
         vm.prank(chainAdmin);
         notifierAdmin.upgrade(ITransparentUpgradeableProxy(address(fresh)), notifierImplNew);
         RegistryBootstrapMigration gated = _deployAndAuthorize(manifest);
 
-        vm.expectRevert(bytes(""));
+        vm.expectRevert(abi.encodeWithSelector(BootstrapAuthorityNotHeld.selector, address(fresh), chainAdmin));
         gated.migrate();
         assertFalse(gated.executed(), "a refused edge must stay unspent");
         assertEq(chainContractAddress.protocolVersion(), 0, "a refused edge must not move the CTM");
     }
 
-    /// @dev `migrate` does not read who owns the notifier (§2 (c)/(d)): the ownership half of the
-    ///      handover is enforced by the bundle's first call, the executor's accept, which reverts
-    ///      unless the ChainAdmin nominated it (`RegistryBootstrapSequence.t.sol`), and protocol-ops
-    ///      reviews it (`judge_notifier_handover`). Run on its own, the edge completes and leaves the
-    ///      nomination for that accept.
-    function test_migrateLeavesTheNotifiersOwnershipToTheBundlesAccept() public {
+    /// @dev The ChainAdmin did its half — the proxy moved, the executor is nominated — but
+    ///      governance has not accepted yet: the notifier is still the ChainAdmin's.
+    function test_revertWhen_notifierNominatedButNotAccepted() public {
         (BootstrapManifest memory manifest, TransparentUpgradeableProxy fresh) = _manifestWithFreshNotifier();
         _moveNotifierUnderTheCtmProxyAdmin(fresh);
         _nominateExecutorForNotifier(fresh);
         RegistryBootstrapMigration gated = _deployAndAuthorize(manifest);
 
+        vm.expectRevert(abi.encodeWithSelector(BootstrapAuthorityNotHeld.selector, address(fresh), chainAdmin));
         gated.migrate();
-        assertEq(_liveImpl(ctmProxyAdmin, fresh), notifierImplNew, "the row applies");
-        assertEq(Ownable2Step(address(fresh)).owner(), chainAdmin, "the ownership is still the ChainAdmin's");
-        assertEq(Ownable2Step(address(fresh)).pendingOwner(), address(ctmExecutor), "nominated to the executor");
 
         _acceptNotifierThroughTheExecutor(fresh);
+        gated.migrate();
         assertEq(Ownable2Step(address(fresh)).owner(), address(ctmExecutor));
+        assertEq(_liveImpl(ctmProxyAdmin, fresh), notifierImplNew, "the row applies once the handover is done");
     }
 
     /// @dev Ownership handed over, but the proxy is still under its old ProxyAdmin. A transparent
@@ -1287,8 +1442,25 @@ contract RegistryBootstrapMigrationTest is ChainTypeManagerTest, RegistryPostSta
         assertTrue(gated.executed());
     }
 
-    /// @dev The manifest's notifier must be the one the CTM serves when the edge runs: the CTM's
-    ///      OWNER re-pointing it between review and `migrate` makes the edge revert (§2 (a)).
+    /// @dev A nomination the executor itself issued would let its nominee take the notifier right
+    ///      after the edge.
+    function test_revertWhen_notifierHasAPendingNomination() public {
+        address nominee = makeAddr("nominee");
+        Call[] memory calls = new Call[](1);
+        calls[0] = Call({
+            target: address(notifierProxy),
+            value: 0,
+            data: abi.encodeCall(Ownable2Step.transferOwnership, (nominee))
+        });
+        vm.prank(governor);
+        ctmExecutor.forward(calls);
+        _handOverAuthority();
+
+        vm.expectRevert(abi.encodeWithSelector(BootstrapNominationPending.selector, address(notifierProxy), nominee));
+        migration.migrate();
+    }
+
+    /// @dev The manifest's notifier must be the one the CTM serves.
     function test_revertWhen_notifierIsNotTheCtms() public {
         address other = makeAddr("otherNotifier");
         vm.prank(governor);
@@ -1315,7 +1487,7 @@ contract RegistryBootstrapMigrationTest is ChainTypeManagerTest, RegistryPostSta
 
         _handOverAuthority();
         migration.migrate();
-        _assertBootstrapApplied(migration);
+        migration.validateApplied();
     }
 
     /// @dev ... and it must serve this CTM.
@@ -1337,26 +1509,69 @@ contract RegistryBootstrapMigrationTest is ChainTypeManagerTest, RegistryPostSta
         migration.migrate();
     }
 
-    /// @dev A row pointing a proxy at an address with no code is refused by OZ's ERC1967 upgrade
-    ///      (boot-39), and the whole edge with it.
+    // ─────────────────────────── completion check ───────────────────────────
+
+    /// @dev Completion does not pin the CTM-domain proxies to the rows `migrate()` applied:
+    ///      governance re-patching one through the executor afterwards still completes.
+    function test_validateApplied_passesAfterAnInfrastructureRepatch() public {
+        _handOverAuthority();
+        migration.migrate();
+
+        Call[] memory calls = new Call[](1);
+        calls[0] = Call({
+            target: address(ctmProxyAdmin),
+            value: 0,
+            data: abi.encodeCall(
+                ProxyAdmin.upgrade,
+                (ITransparentUpgradeableProxy(address(ctmDomainProxy)), implUnknown)
+            )
+        });
+        vm.prank(governor);
+        ctmExecutor.forward(calls);
+        assertEq(_liveImpl(ctmProxyAdmin, ctmDomainProxy), implUnknown, "fixture: the row's proxy moved on");
+
+        migration.validateApplied();
+    }
+
+    /// @dev The notifier must stay the CTM executor's: the gate refuses once its ownership left.
+    function test_revertWhen_validateAppliedAfterTheNotifierLeftTheExecutor() public {
+        _handOverAuthority();
+        migration.migrate();
+        address stranger = makeAddr("stranger");
+        Call[] memory calls = new Call[](1);
+        calls[0] = Call({
+            target: address(notifierProxy),
+            value: 0,
+            data: abi.encodeCall(Ownable2Step.transferOwnership, (stranger))
+        });
+        vm.prank(governor);
+        ctmExecutor.forward(calls);
+        vm.prank(stranger);
+        Ownable2Step(address(notifierProxy)).acceptOwnership();
+
+        vm.expectRevert(abi.encodeWithSelector(BootstrapAuthorityNotHeld.selector, address(notifierProxy), stranger));
+        migration.validateApplied();
+    }
+
     function test_revertWhen_rowImplementationHasNoCode() public {
+        // A row pointing a proxy at an address with no code would brick it; `ProxyAdmin` refuses
+        // it too, but the edge has to say so before it spends itself.
         vm.etch(implV32, "");
         _handOverAuthority();
 
-        vm.expectRevert("ERC1967: new implementation is not a contract");
+        vm.expectRevert(abi.encodeWithSelector(RegistryTargetHasNoCode.selector, implV32));
         migration.migrate();
-        assertFalse(migration.executed(), "a refused edge must stay unspent");
     }
 
-    /// @dev The commit reads the release's version, which fails on a codeless release (boot-43); a
-    ///      release with code is validated where the CTM installs it.
     function test_revertWhen_releaseHasNoCode() public {
+        // The anchor this edge installs is READ from the release's live code, so a codeless
+        // release would anchor the empty-code hash and accept nothing afterwards. Refused before
+        // the migration spends itself.
         vm.etch(address(genesisRelease), "");
         _handOverAuthority();
 
-        vm.expectRevert(bytes(""));
+        vm.expectRevert(abi.encodeWithSelector(RegistryTargetHasNoCode.selector, address(genesisRelease)));
         migration.migrate();
-        assertFalse(migration.executed(), "a refused edge must stay unspent");
     }
 
     function test_manifestHashCommitsToTheWholeEdge() public view {
@@ -1399,6 +1614,7 @@ contract RegistryBootstrapMigrationTest is ChainTypeManagerTest, RegistryPostSta
         manifest.currentRelease = address(_deployRelease(new bytes[](L2_ECOSYSTEM_CONTRACT_COUNT)));
         RegistryBootstrapMigration authorized = _deployAndAuthorize(manifest);
 
+        vm.expectCall(address(ctmProxyAdmin), abi.encodeWithSelector(ProxyAdmin.upgrade.selector), 0);
         vm.expectRevert(abi.encodeWithSelector(RegistryEmptySelectors.selector, emptyFacet));
         authorized.migrate();
         assertFalse(authorized.executed(), "a refused edge must stay unspent");
@@ -1407,7 +1623,7 @@ contract RegistryBootstrapMigrationTest is ChainTypeManagerTest, RegistryPostSta
 
     /// @dev The bootstrap installs the release without cutting a diamond, so a selector two facets
     ///      route would surface only in every chain's crossing (`FacetExists`). The migration
-    ///      refuses the release before it spends itself.
+    ///      refuses the release before it spends itself and before any row moves.
     function test_revertWhen_releaseRoutesASelectorTwice() public {
         bytes4 shared = ISelfDescribingFacet(facetCuts[1].facet).selectors()[0];
         bytes4[] memory colliding = new bytes4[](1);
@@ -1417,6 +1633,7 @@ contract RegistryBootstrapMigrationTest is ChainTypeManagerTest, RegistryPostSta
         manifest.currentRelease = address(_deployRelease(new bytes[](L2_ECOSYSTEM_CONTRACT_COUNT)));
         RegistryBootstrapMigration authorized = _deployAndAuthorize(manifest);
 
+        vm.expectCall(address(ctmProxyAdmin), abi.encodeWithSelector(ProxyAdmin.upgrade.selector), 0);
         vm.expectRevert(abi.encodeWithSelector(RegistryDuplicateSelector.selector, shared));
         authorized.migrate();
         assertFalse(authorized.executed(), "a refused edge must stay unspent");

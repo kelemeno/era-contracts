@@ -236,12 +236,13 @@ it is the executor legs — `CoreUpgradeExecutor.applyL1Upgrade`,
 its object exists, in that order — plus the declared external actions (the merger's PUH wiring and
 CTM `acceptOwnership` normalization, and whatever calls the release declared); on the v35
 bootstrap edge it is the run the `RegistryBootstrapSequence` derives, ending with
-`RegistryBootstrapMigration.migrate()`.
+`RegistryBootstrapMigration.validateApplied()`.
 
 The bundle is one atomic transaction: the legs apply the ecosystem proxy rows, then the CTM-domain
 rows, then `setNewVersionUpgradeFromTransition` (which commits the transition and installs the
-target release as the CTM's `currentRelease`); any failure reverts the whole proposal. There are no
-stages and no delay between parts, and chain migrations are not paused around it
+target release as the CTM's `currentRelease`), each verifying what it applied; any failure reverts
+the whole proposal. There are no stages and no delay between parts, and chain migrations are not
+paused around it
 ([migration pauses are incident control](../docs/upgrade-operations.md#migration-pauses-are-incident-control)).
 The semantics are specified in
 [Ecosystem upgrade coordination](./ecosystem-upgrade-coordination.md#execution).
@@ -309,9 +310,15 @@ otherwise.
    (`upgradeCutForVersion`, derived from the committed transition). A chain that predates v35
    crosses the bootstrap edge through the legacy cut-taking entrypoint instead, which
    `AdminFunctions.upgradeChainFromCTM` selects (`UpgradeChainCall.requiresCut`). Governance can
-   also cross any chain itself with `CTMUpgradeExecutor.upgradeChain(transition, chainId)`, and
-   anyone can once the departing version's deadline has passed
-   ([Flow: upgrading](../docs/registry-driven-upgrades.md#flow-upgrading)).
+   also cross a chain itself. A chain at v35 or later crosses with
+   `CTMUpgradeExecutor.upgradeChain(transition, chainId)`, which only the executor's owner or the
+   chain's own admin may call
+   ([Flow: upgrading](../docs/registry-driven-upgrades.md#flow-upgrading)). A chain that predates
+   v35 departs from a version committed through the legacy path, which has no transition, so
+   governance hands it the committed cut (`RegistryBootstrapMigration.upgradeCut()` on the bootstrap
+   edge) through `ChainTypeManager.upgradeChainFromVersion(chainId, oldVersion, cut)`, sent through
+   `CTMUpgradeExecutor.forward`; the chain refuses a cut whose hash differs from the one its CTM
+   committed, or a version other than its own.
 5. The batch carrying the upgrade transaction is committed and executed under the new version: the
    built-ins are force-deployed and the L2 upgrade contract initializes them. The chain is on the
    new version for good once that batch has been executed on L1.
@@ -325,39 +332,63 @@ replay when the bundle is prepared, which reflects the chain's state at that mom
 The transition is committed with no deadline on the old version (`type(uint256).max`). Once every
 chain has upgraded, governance can expire the old version with
 `ChainTypeManager.setProtocolVersionDeadline(oldVersion, timestamp)`, sent through
-`CTMUpgradeExecutor.forward`, after which a chain still on it cannot commit batches until it
-upgrades, and anyone may cross it with `CTMUpgradeExecutor.upgradeChain`. The committed artifacts
-(`ecosystem.toml`, `transactions.txt`, the scenarios, the per-chain bundles) stay in the release's
-`output/<env>/` directory as the record of the rollout, and `permanent-values/<env>.toml` is updated
-with any address the release moved.
+`CTMUpgradeExecutor.forward`, after which a chain still on it cannot commit batches until its
+admin or governance crosses it. The timestamp must be nonzero: a stored 0 means unset, and a
+version with a committed transition then falls back to the deadline that transition pinned (none by
+default), so expiring it takes a past timestamp such as 1.
+The committed artifacts (`ecosystem.toml`, `transactions.txt`, the scenarios, the per-chain
+bundles) stay in the release's `output/<env>/` directory as the record of the rollout, and
+`permanent-values/<env>.toml` is updated with any address the release moved.
 
 ## Where each check lives
 
 A proposal executes days after its package was reviewed, and in between, state that governance
-does not control can move. Each check of an upgrade therefore lives in one place, chosen by what it
-reads:
+does not control can move. Each check of an upgrade therefore has a home, chosen by what it reads.
+protocol-ops may run an on-chain check earlier, so a bad package fails at review rather than at
+execution, but it never replaces it:
 
-| Where                          | What it checks                                                                                                                                                                                                                                                                                                                                                                                             |
-| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| The contracts, live state      | State at execution that can change after review, by governance or by someone else (the CTM admin, a ChainAdmin, validators, the permissionless `migrate` / `upgradeChain` caller): proxy implementations; the CTM's `currentRelease`, `protocolVersion` and `upgradeTransition`; bytecode publication; `serverNotifierAddress` and the notifier's CTM; each chain's batch counters, routing and fee params |
-| The contracts, write-once      | Cheap construction invariants whose failure cannot be undone: the `VersionEdgeLib` edge rules; a zero verifier or genesis batch hash, an empty facet set or a wrong L2 table length in a release; an ownerless executor (a zero initial owner; `renounceOwnership` reverts); code at every address bound into a release or transition when it is installed or committed                                    |
-| protocol-ops, before the vote  | The review-time facts (`verify-package`): code identity, CREATE2 provenance, immutables by value (code identity masks them), the manifest contents (zero row fields, self-edges, duplicate proxies, empty inventories), executor bindings, bundle order, the arriving release's `validate()` by `eth_call`, and bytecode publication as an early readiness check                                           |
-| protocol-ops, after the replay | The post-state `ecosystem upgrade-governance` finds on its fork: the CTM's version, release and committed transition, who holds the CTM domain and the notifier, the executors' owners, every row's proxy at its `implNew`                                                                                                                                                                                 |
-| Tests                          | That the reviewed code is right, including its post-conditions within one transaction: the Foundry tests and the Anvil runners assert them, and the contracts never re-check them                                                                                                                                                                                                                          |
+| Where                          | What it checks                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The contracts, live state      | State at execution that can change after review, by governance or by someone else (the CTM admin, a ChainAdmin, validators, the permissionless `migrate` caller): proxy implementations and code at every row's `implNew`, before the first swap; the CTM's `currentRelease`, `protocolVersion` and `upgradeTransition`; bytecode publication; `serverNotifierAddress` and the notifier's CTM; on the bootstrap edge, who owns the CTM, both `ProxyAdmin`s, the notifier and the executors, with no nomination pending, and whether `migrate()` already ran; each chain's batch counters, routing and fee params                                  |
+| The contracts, write-once      | Cheap construction invariants whose failure cannot be undone: the `VersionEdgeLib` edge rules; zero members, a zero genesis batch hash, an empty facet set, repeated facet rows or a wrong L2 table length in a release; a transition built over a release that does not `validate()`; zero, self-edge or duplicate rows, a wrong inventory length or no participating row in a proxy upgrade transition; zero bindings in an executor, a transition or the bootstrap edge; an ownerless executor (a zero initial owner; `renounceOwnership` reverts); code at every address bound into a release or transition when it is installed or committed |
+| protocol-ops, before the vote  | The review-time facts (`verify-package`): code identity, CREATE2 provenance, immutables by value (code identity masks them), the manifest contents (zero row fields, self-edges, duplicate proxies, empty inventories), executor bindings (the contracts refuse these too; protocol-ops reports them before the vote), bundle order, the arriving release's `validate()` by `eth_call`, and bytecode publication as an early readiness check                                                                                                                                                                                                      |
+| protocol-ops, after the replay | The post-state `ecosystem upgrade-governance` finds on its fork: the CTM's version, release and committed transition, who holds the CTM domain and the notifier, the executors' owners, every row's proxy at its `implNew`                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Tests                          | That the reviewed code is right, including its post-conditions within one transaction: the Foundry tests and the Anvil runners assert them, and the contracts never re-check them, except the bootstrap's `validateApplied()` and the executor's commit check                                                                                                                                                                                                                                                                                                                                                                                     |
 
-Three rules keep each check in one place:
+Three rules decide where a check lives:
 
-- **A write-once object checks its own shape once.** A release's `validate()` runs when
-  `ChainTypeManager._setCurrentRelease` installs it, and nothing downstream re-checks the release.
-  It depends only on the code at the addresses it names, so its `eth_call` before the vote predicts
-  the install.
+- **A write-once object checks its own shape before anything is built from it.** A release refuses
+  zero members and repeated facet rows at construction. Its `validate()` runs before anything is
+  derived from it or installed: in a transition's constructor, in the bootstrap's `validate()`, and
+  when `ChainTypeManager._setCurrentRelease` installs it. It depends only on the code at the
+  addresses it names, so its `eth_call` before the vote predicts the install. Once a release is
+  installed, nothing validates it again: chain creation, and the `validate()` of a transition
+  departing from it, rely on the install-time run.
 - **A live check lives in the contract that owns the state.** The CTM, not an executor wrapper,
   checks a commit and a replacement, so a call sent through `forward` gets the same checks.
-- **A check is deleted when the next statement already reverts on every path**: decoding empty
-  return data, the code-size check of a call that returns nothing, OpenZeppelin ERC1967's
-  `isContract`, `onlyOwner`. Only the error name is lost.
+- **A check that guards a write stays where the write happens.** It runs there even when an
+  earlier step already guarantees it (an object's constructor, `L2PlanLib.build`, protocol-ops),
+  and even when a later statement would revert anyway. The earlier step sees only the genuine
+  objects and reviewed bundles it was given, and the later revert fires after other writes, or
+  without a name. This covers every zero-address or empty-input check on a write, a named code
+  check (`RegistryTargetHasNoCode`) before a call into an object or a row's `implNew`, authority
+  checks before a hand-over, and bounds whose violation halts a chain: at most
+  `MAX_NEW_FACTORY_DEPS` factory dependencies, major version 0. A check is deleted only in four
+  cases:
+  - when the feature it guards is gone;
+  - when the same check already runs in the same call;
+  - when a strictly stronger check runs at the same point, before any write, such as
+    `replaceUpgradeTransition` requiring `expected` to be the committed transition. The deletion
+    names the check that replaced it;
+  - when it would validate an installed release again (the first rule).
 
-A check moves off chain only once protocol-ops performs it.
+  The `ChainTypeManager`, close to the EIP-170 size limit, names no code check of its own: a
+  release or transition it is handed without code fails the CTM's first call into it, without a
+  name.
+
+Only a check that guards no write may live off chain alone: a review-time fact, or a post-condition
+of the same transaction. protocol-ops performing a check is never by itself a reason to delete its
+on-chain copy.
 
 ## Authoring a release
 

@@ -66,7 +66,6 @@ contract CoreUpgrade_v35 is DefaultCoreUpgrade {
         (, bytes32 salt) = getCreate2FactoryParams();
         address owner = getOwnerAddress();
         address proxyAdmin = coreAddresses.shared.transparentProxyAdmin;
-        // The executor's binding is immutable and the constructor does not refuse a zero one.
         require(proxyAdmin != address(0), "ecosystem ProxyAdmin not discovered");
         coreUpgradeExecutor = CoreUpgradeExecutor(
             payable(

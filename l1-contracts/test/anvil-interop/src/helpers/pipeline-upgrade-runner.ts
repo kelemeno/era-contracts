@@ -15,10 +15,11 @@
  *   4. `protocol-ops ecosystem upgrade-prepare-all` with the scenario's core/CTM script paths
  *      (deployer Safe bundles replayed onto the harness anvil, the ChainAdmin's half of the one-time
  *      ServerNotifier handover included); the merged governance bundle is asserted to be exactly
- *      the one `RegistryBootstrapSequence.actions()` derives, closing with `migrate()`;
- *      `protocol-ops ecosystem verify-bootstrap` must pass on the package (see
+ *      the one `RegistryBootstrapSequence.actions()` derives, closing with the edge's completion
+ *      check; `protocol-ops ecosystem verify-bootstrap` must pass on the package (see
  *      `verifyPackageAsReviewed`). Then `protocol-ops ecosystem upgrade-governance` replays that
- *      one bundle, and the edge's post-state is read back live (`assertBootstrapCompleted`).
+ *      one bundle, and the completion check and the edge's post-state are read back live
+ *      (`assertBootstrapCompleted`).
  *   5. Per-chain legacy handed-cut crossing, recorded-L2-tx verification, and the L2 relay of
  *      the proposed upgrade transaction on each chain's anvil fork.
  *   6. Final protocol-version verification on every upgraded chain.

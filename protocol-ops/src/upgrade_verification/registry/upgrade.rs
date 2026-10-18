@@ -1005,9 +1005,9 @@ pub(super) async fn verify_release<P: Provider>(
     Ok(())
 }
 
-/// The release's own `validate()`, called before the vote. It is state-independent and runs once
-/// on chain, when the CTM installs the release, so a revert here is the install failing at
-/// governance execution; nothing earlier refuses such a release.
+/// The release's own `validate()`, called before the vote. It is state-independent and runs on
+/// chain when a transition is built over the release, in the bootstrap's `validate()`, and when
+/// the CTM installs it, so a revert here is the release failing every one of them.
 fn judge_release_validity(
     result: &mut VerificationResult,
     label: &str,
@@ -1031,13 +1031,12 @@ fn judge_release_validity(
     });
     let why = match revert {
         Some(data) if data.is_empty() => {
-            "it reverts without data: a facet has no code or does not answer `selectors()`"
-                .to_string()
+            "it reverts without data: a facet does not answer `selectors()`".to_string()
         }
         Some(data) => match error.as_decoded_interface_error::<CTMReleaseViewErrors>() {
             Some(CTMReleaseViewErrors::RegistryTargetHasNoCode(e)) => format!(
-                "`RegistryTargetHasNoCode({})`: its diamondInit, genesisUpgrade or verifier has no \
-                 code",
+                "`RegistryTargetHasNoCode({})`: its diamondInit, genesisUpgrade, verifier or a \
+                 facet has no code",
                 e.target
             ),
             Some(CTMReleaseViewErrors::RegistryEmptySelectors(e)) => format!(
@@ -1119,7 +1118,7 @@ pub(super) async fn verify_proxy_upgrade_transition<P: Provider>(
     if participating(&manifest.proxyUpgrades) == 0 {
         result.report_error(&format!(
             "{label} at {transition} upgrades nothing: no slot of its inventory has a nonzero \
-             `implNew`. No contract refuses an empty transition, so omit the leg instead"
+             `implNew`, which the object's constructor refuses; omit the leg instead"
         ));
     }
     result.print_info(&format!(
@@ -1823,9 +1822,9 @@ mod tests {
         );
     }
 
-    /// objlib-24: a transition with no participating row upgrades nothing. No contract refuses
-    /// it any more, so the review does, on either domain — and still hands the (inert) inventory
-    /// on, which no row check reads.
+    /// objlib-24: a transition with no participating row upgrades nothing. Its constructor refuses
+    /// it, and so does the review, on either domain — which still hands the (inert) inventory on,
+    /// which no row check reads.
     #[tokio::test]
     async fn an_empty_proxy_upgrade_transition_upgrades_nothing() {
         for (domain, slots, expected) in [
@@ -1929,10 +1928,7 @@ mod tests {
                 .abi_encode(),
                 "RegistryDuplicateSelector(0x12345678)",
             ),
-            (
-                Vec::new(),
-                "a facet has no code or does not answer `selectors()`",
-            ),
+            (Vec::new(), "a facet does not answer `selectors()`"),
             (vec![0xde, 0xad, 0xbe, 0xef], "reverts with 0xdeadbeef"),
         ] {
             let result = judge_validate(Some(Bytes::from(revert))).await;

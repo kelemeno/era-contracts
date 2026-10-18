@@ -14,9 +14,11 @@ import {IAdmin} from "contracts/state-transition/chain-interfaces/IAdmin.sol";
 import {SemVer} from "contracts/common/libraries/SemVer.sol";
 import {
     L2BytecodeNotPublished,
+    NoCommittedUpgradeCutForVersion,
     ProtocolIdMismatch,
     RegistryEmptySelectors,
-    RegistryTargetHasNoCode
+    RegistryTargetHasNoCode,
+    ZeroAddress
 } from "contracts/common/L1ContractErrors.sol";
 import {MockSelfDescribingFacet} from "contracts/dev-contracts/test/MockSelfDescribingFacet.sol";
 import {ProtocolVersionTooSmall} from "contracts/upgrades/ZkSyncUpgradeErrors.sol";
@@ -77,16 +79,17 @@ contract CommitChecksTest is CTMUpgradeExecutorFixture {
         _assertNothingCommitted();
     }
 
-    /// @dev A transition no longer validates its releases at construction; the release it installs
-    ///      is validated in the same commit, so a transition toward an invalid release can be built
-    ///      but never committed, and nothing moves (objlib-16). protocol-ops `eth_call`s the release's
-    ///      `validate()` before the vote.
+    /// @dev The release a commit installs is validated by `_setCurrentRelease` in the same call, and
+    ///      nothing moves when it does not validate. A genuine transition validates both releases at
+    ///      construction, so it cannot name such a release: the transition's `newRelease()` is mocked
+    ///      to isolate the install-time check from the constructor's.
     function test_revertWhen_committingTowardAReleaseThatDoesNotValidate() public {
         ReleaseManifest memory codelessMember = _releaseManifest(5, newVersion);
         address codeless = makeAddr("codelessGenesisUpgrade");
         codelessMember.genesisUpgrade = codeless;
-        release = new CTMRelease(codelessMember);
+        CTMRelease invalid = new CTMRelease(codelessMember);
         CTMTransition toward = _deployTransition(777);
+        vm.mockCall(address(toward), abi.encodeCall(ICTMTransition.newRelease, ()), abi.encode(address(invalid)));
         vm.expectRevert(abi.encodeWithSelector(RegistryTargetHasNoCode.selector, codeless));
         _execute(toward);
         _assertNothingCommitted();
@@ -99,26 +102,28 @@ contract CommitChecksTest is CTMUpgradeExecutorFixture {
         address emptyFacet = address(new MockSelfDescribingFacet(new bytes4[](0)));
         facets[facets.length - 1] = GenesisFacet({facet: emptyFacet, isFreezable: false});
         selectorless.genesisFacets = facets;
-        release = new CTMRelease(selectorless);
-        toward = _deployTransition(778);
+        invalid = new CTMRelease(selectorless);
+        vm.mockCall(address(toward), abi.encodeCall(ICTMTransition.newRelease, ()), abi.encode(address(invalid)));
         vm.expectRevert(abi.encodeWithSelector(RegistryEmptySelectors.selector, emptyFacet));
         _execute(toward);
         _assertNothingCommitted();
     }
 
-    /// @dev A transition no longer refuses a zero engine at construction; the commit's code check
-    ///      does (objlib-15).
-    function test_revertWhen_committingATransitionWithAZeroEngine() public {
+    /// @dev A transition refuses a zero engine at construction. An engine that has no code by the
+    ///      commit is refused there, and nothing moves.
+    function test_revertWhen_aTransitionNamesAZeroOrCodelessEngine() public {
         TransitionManifest memory manifest = _transitionManifest(
             777,
             chainContractAddress.currentRelease(),
             L2_DELEGATE_CODE
         );
         manifest.upgradeEngine = address(0);
-        CTMTransition zeroEngine = new CTMTransition(manifest);
+        vm.expectRevert(ZeroAddress.selector);
+        new CTMTransition(manifest);
 
-        vm.expectRevert(abi.encodeWithSelector(RegistryTargetHasNoCode.selector, address(0)));
-        _execute(zeroEngine);
+        vm.etch(upgradeEngineAddr, "");
+        vm.expectRevert(abi.encodeWithSelector(RegistryTargetHasNoCode.selector, upgradeEngineAddr));
+        _execute(transition);
         _assertNothingCommitted();
     }
 
@@ -151,9 +156,9 @@ contract CommitChecksTest is CTMUpgradeExecutorFixture {
         _assertNothingCommitted();
     }
 
-    /// @dev The engines no longer check the majors of the versions they move between: a chain
-    ///      crosses only an edge departing its own version, and no committed edge departs a
-    ///      non-zero major (`VersionEdgeLib`), so the committed-cut path cannot reach one (base-04).
+    /// @dev A chain crosses only an edge departing its own version, and no committed edge departs a
+    ///      non-zero major (`VersionEdgeLib`), so the committed-cut path cannot reach the engines'
+    ///      own major checks (`BaseZkSyncUpgrade._setNewProtocolVersion`, tested there).
     function test_aChainAtANonZeroMajorCannotReachACommittedCut() public {
         _execute(transition);
         uint256 nonZeroMajor = SemVer.packSemVer(1, 0, 0);
@@ -165,7 +170,7 @@ contract CommitChecksTest is CTMUpgradeExecutorFixture {
 
         // Nothing departs the chain's own version, so there is no cut for it to read either.
         address chainAdmin = IChainTypeManager(address(chainContractAddress)).getChainAdmin(chainId);
-        vm.expectRevert(bytes(""));
+        vm.expectRevert(abi.encodeWithSelector(NoCommittedUpgradeCutForVersion.selector, nonZeroMajor));
         vm.prank(chainAdmin);
         IAdmin(chainAddress).upgradeChainFromVersion(chainAddress, nonZeroMajor);
         assertEq(UtilsFacet(chainAddress).util_getProtocolVersion(), nonZeroMajor, "the chain did not move");

@@ -12,7 +12,7 @@ import {IChainTypeManager} from "contracts/state-transition/IChainTypeManager.so
 
 import {ICTMRelease} from "contracts/upgrades/registry/objects/ICTMRelease.sol";
 import {IBridgehubBase} from "contracts/core/bridgehub/IBridgehubBase.sol";
-import {DelegateCallFailed, EmptyAssetId, ZeroAddress} from "contracts/common/L1ContractErrors.sol";
+import {EmptyAssetId, GenesisBatchHashZero, ZeroAddress} from "contracts/common/L1ContractErrors.sol";
 import {IL1AssetRouter} from "contracts/bridge/asset-router/IL1AssetRouter.sol";
 import {
     L2DACommitmentScheme,
@@ -23,7 +23,8 @@ import {
 contract InitializeTest is DiamondInitTest {
     /// @dev The length of a serialized L2 log must differ from that of an L2 log tree node's
     ///      preimage (two words), or a log could be passed off as a node. Both are constants, so
-    ///      this is a property of the build rather than a check any contract runs (dinit-13).
+    ///      the `assert`s in the CTM constructor and `DiamondInit` cannot fail at runtime; this
+    ///      test is what catches a constant change.
     function test_anL2LogIsNotTheSizeOfATreeNodePreimage() public pure {
         assertTrue(L2_TO_L1_LOG_SERIALIZE_SIZE != 2 * 32, "an L2 log must not be the size of a node preimage");
     }
@@ -46,6 +47,21 @@ contract InitializeTest is DiamondInitTest {
         return address(new DiamondProxy(block.chainid, _cut));
     }
 
+    function test_revertWhen_verifierIsZeroAddress() public {
+        // Mock CTM to return zero address for verifier
+        vm.mockCall(
+            Utils.TEST_GENESIS_REGISTRY,
+            abi.encodeWithSelector(ICTMRelease.verifier.selector),
+            abi.encode(address(0))
+        );
+
+        Diamond.DiamondCutData memory cut = _buildCut(Utils.TEST_CHAIN_ID, Utils.TEST_CHAIN_ADMIN);
+
+        vm.expectRevert(ZeroAddress.selector);
+
+        _deployDiamondAsCtm(cut);
+    }
+
     function test_revertWhen_governorIsZeroAddress() public {
         Diamond.DiamondCutData memory cut = _buildCut(Utils.TEST_CHAIN_ID, address(0));
         vm.expectRevert(ZeroAddress.selector);
@@ -66,8 +82,6 @@ contract InitializeTest is DiamondInitTest {
         _deployDiamondAsCtm(cut);
     }
 
-    /// @dev No zero check of its own: the init's first read of a zero bridgehub (the base token
-    ///      asset id) fails to decode, so the chain is never created.
     function test_revertWhen_bridgehubAddressIsZero() public {
         vm.mockCall(
             Utils.TEST_CHAIN_TYPE_MANAGER,
@@ -77,7 +91,7 @@ contract InitializeTest is DiamondInitTest {
 
         Diamond.DiamondCutData memory cut = _buildCut(Utils.TEST_CHAIN_ID, Utils.TEST_CHAIN_ADMIN);
 
-        vm.expectRevert(abi.encodeWithSelector(DelegateCallFailed.selector, bytes("")));
+        vm.expectRevert(ZeroAddress.selector);
 
         _deployDiamondAsCtm(cut);
     }
@@ -96,7 +110,6 @@ contract InitializeTest is DiamondInitTest {
         _deployDiamondAsCtm(cut);
     }
 
-    /// @dev No zero check of its own: reading the native token vault off a zero asset router fails.
     function test_revertWhen_assetRouterIsZeroAddress() public {
         vm.mockCall(
             address(dummyBridgehub),
@@ -104,7 +117,7 @@ contract InitializeTest is DiamondInitTest {
             abi.encode(address(0))
         );
         Diamond.DiamondCutData memory cut = _buildCut(Utils.TEST_CHAIN_ID, Utils.TEST_CHAIN_ADMIN);
-        vm.expectRevert(abi.encodeWithSelector(DelegateCallFailed.selector, bytes("")));
+        vm.expectRevert(ZeroAddress.selector);
         _deployDiamondAsCtm(cut);
     }
 
@@ -134,6 +147,17 @@ contract InitializeTest is DiamondInitTest {
         );
         Diamond.DiamondCutData memory cut = _buildCut(Utils.TEST_CHAIN_ID, Utils.TEST_CHAIN_ADMIN);
         vm.expectRevert(ZeroAddress.selector);
+        _deployDiamondAsCtm(cut);
+    }
+
+    function test_revertWhen_storedBatchZeroIsZero() public {
+        vm.mockCall(
+            Utils.TEST_CHAIN_TYPE_MANAGER,
+            abi.encodeWithSelector(IChainTypeManager.storedBatchZero.selector),
+            abi.encode(bytes32(0))
+        );
+        Diamond.DiamondCutData memory cut = _buildCut(Utils.TEST_CHAIN_ID, Utils.TEST_CHAIN_ADMIN);
+        vm.expectRevert(GenesisBatchHashZero.selector);
         _deployDiamondAsCtm(cut);
     }
 
@@ -199,8 +223,6 @@ contract InitializeTest is DiamondInitTest {
 
     /// @notice The genesis registry is mandatory: a CTM that pins none must make chain creation
     ///         fail loudly.
-    /// @dev No zero check of its own: reading the facet rows off a zero release fails. (The CTM
-    ///      itself never holds a zero release: it read the release's version when installing it.)
     function test_revertWhen_genesisRegistryIsZeroAddress() public {
         vm.mockCall(
             Utils.TEST_CHAIN_TYPE_MANAGER,
@@ -210,7 +232,7 @@ contract InitializeTest is DiamondInitTest {
 
         Diamond.DiamondCutData memory cut = _buildCut(Utils.TEST_CHAIN_ID, Utils.TEST_CHAIN_ADMIN);
 
-        vm.expectRevert(abi.encodeWithSelector(DelegateCallFailed.selector, bytes("")));
+        vm.expectRevert(ZeroAddress.selector);
 
         _deployDiamondAsCtm(cut);
     }

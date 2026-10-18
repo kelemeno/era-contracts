@@ -17,7 +17,7 @@ import {ETH_TOKEN_ADDRESS} from "contracts/common/Config.sol";
 import {SemVer} from "contracts/common/libraries/SemVer.sol";
 import {PreviousUpgradeNotFinalized} from "contracts/upgrades/ZkSyncUpgradeErrors.sol";
 import {NotAllBatchesExecuted} from "contracts/state-transition/L1StateTransitionErrors.sol";
-import {TimeNotReached} from "contracts/common/L1ContractErrors.sol";
+import {TimeNotReached, ZeroAddress} from "contracts/common/L1ContractErrors.sol";
 
 import {BaseUpgrade} from "./_SharedBaseUpgrade.t.sol";
 import {BaseUpgradeUtils} from "./_SharedBaseUpgradeUtils.t.sol";
@@ -132,6 +132,22 @@ contract DefaultUpgradeTest is BaseUpgrade, RegistryObjectsFixture {
         assertEq(engine.getVerifier(), newVerifier);
         assertEq(engine.getProtocolVersion(), protocolVersion);
         assertEq(engine.facetAddress(SEL_DEPARTING), facetDeparting, "no facet change on a verifier-only hop");
+    }
+
+    /// @dev `_upgrade` reads a zero verifier as "leave unchanged", so a target release naming none
+    ///      would upgrade the chain while silently keeping the departing verifier. A real
+    ///      `CTMRelease` refuses a zero verifier at construction, so its `verifier()` is mocked here
+    ///      to isolate the engine's own check.
+    function test_revertWhen_upgradeFromTransition_theTargetReleaseNamesNoVerifier() public {
+        CTMTransition transition = _defaultTransition(0);
+        vm.mockCall(address(newRelease), abi.encodeCall(ICTMRelease.verifier, ()), abi.encode(address(0)));
+
+        vm.expectRevert(ZeroAddress.selector);
+        engine.upgradeFromTransition(address(transition));
+
+        assertEq(engine.getProtocolVersion(), 0, "the version is unchanged");
+        assertEq(engine.getVerifier(), fromVerifier, "the departing verifier is unchanged");
+        assertEq(engine.facetAddress(SEL_DEPARTING), facetDeparting, "the routing is unchanged");
     }
 
     function test_revertWhen_upgradeFromTransition_beforeTheSchedule() public {
@@ -282,7 +298,7 @@ contract DefaultUpgradeTest is BaseUpgrade, RegistryObjectsFixture {
         );
         assertEq(data.baseTokenMetadata.name, ERC20_NAME, "metadata not read from the local token");
         assertEq(data.baseTokenMetadata.symbol, ERC20_SYMBOL, "wrong symbol");
-        assertEq(data.baseTokenMetadata.decimals, COMPOSED_DECIMALS, "wrong decimals");
+        assertEq(data.baseTokenMetadata.decimals, ERC20_DECIMALS, "the token's own decimals on an upgrade");
         // The recorded address is the same local token the metadata came from; the bridging data
         // still describes the token on its origin chain.
         assertEq(data.baseTokenL1Address, address(erc20LocalToken), "wrong L1 base token address");

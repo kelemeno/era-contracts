@@ -36,8 +36,7 @@ Finished, and described where it now lives:
   prepares report; the Rust merger derives those calls and composes nothing else. Spec:
   `protocol-docs/ecosystem-upgrade-coordination.md`.
 - **`UpgradeStageValidator` and `GovernanceUpgradeTimer` are deleted.** The bootstrap's
-  `migrate()` checks its preconditions itself; its completion is checked after the fork replay
-  (`ecosystem upgrade-governance`) and by the tests.
+  `migrate()` and `validateApplied()` check its preconditions and completion themselves.
 - **The ServerNotifier is an ordinary CTM-domain row.** After the bootstrap's one-time handover
   (rendered from live state, `CTMUpgrade_v35.serverNotifierHandoverCalls`;
   `ServerNotifierHandover.t.sol`) no prepare emits an admin call for it.
@@ -105,6 +104,9 @@ Landed, each verified by naming the surviving owner of the responsibility:
   the TypeScript and Rust tooling read receipts, logs and proofs.
 - `DefaultChainUpgrade.run`, `upgradeChainWithoutCut`, `setUpgradeTimestamp` and `getChainConfig`
   are deleted; they duplicated `AdminFunctions.upgradeChainFromCTM` and `adminScheduleUpgrade`.
+- `FinalizeUpgrade.s.sol` (the v31-era post-upgrade init), its `IFinalizeUpgrade` script interface
+  and zkstack-out artifact, and its only helper `MulticallWithGas` are deleted; protocol-ops bound
+  the interface but never called it.
 - Eight dead members on the upgrade bases and the introspector, the one-field `GatewayConfig`
   struct and both copies of the empty `saveOutputVersionSpecific` extension point are deleted, and
   so are `DeployCTM.run()` / `IDeployCTM.run` and its `state_transition_implementation_addr` output

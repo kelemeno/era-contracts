@@ -11,7 +11,13 @@ import {
     EMPTY_STRING_KECCAK,
     GENESIS_BATCH_COMMITMENT
 } from "contracts/common/Config.sol";
-import {TransitionReleaseMismatch} from "contracts/common/L1ContractErrors.sol";
+import {
+    GenesisBatchHashZero,
+    ReleaseProtocolVersionMismatch,
+    TransitionReleaseMismatch,
+    ZeroAddress
+} from "contracts/common/L1ContractErrors.sol";
+import {SemVer} from "contracts/common/libraries/SemVer.sol";
 import {ICommittedUpgrade} from "contracts/upgrades/registry/objects/ICommittedUpgrade.sol";
 import {L2UpgradePlan} from "contracts/upgrades/registry/RegistryTypes.sol";
 import {Utils} from "foundry-test/l1/unit/concrete/Utils/Utils.sol";
@@ -110,9 +116,8 @@ contract CurrentReleaseTest is ChainTypeManagerTest {
         assertEq(chainContractAddress.storedBatchZero(), keccak256(abi.encode(batchZero)), "batch zero too");
     }
 
-    /// @dev The release's version is the edge's target, and reading it off a zero address fails.
     function test_revertWhen_theCutTakingEdgeNamesNoRelease() public {
-        vm.expectRevert(bytes(""));
+        vm.expectRevert(ZeroAddress.selector);
         vm.prank(governor);
         chainContractAddress.setNewVersionUpgrade(getDiamondCutData(diamondInit), 0, type(uint256).max, address(0));
     }
@@ -154,5 +159,59 @@ contract CurrentReleaseTest is ChainTypeManagerTest {
         );
         vm.prank(governor);
         chainContractAddress.setNewVersionUpgradeFromTransition(transition);
+    }
+
+    /// @dev A genuine `CTMTransition` cannot disagree with its own target release — it READS its
+    ///      version from it — so this is the counterfeit case: an object claiming one version and
+    ///      naming a release of another. The pointer and the version never come apart.
+    function test_revertWhen_theTransitionsReleaseIsOfAnotherVersion() public {
+        uint256 claimedVersion = NEW_VERSION;
+        uint256 releaseVersion = SemVer.packSemVer(0, 2, 0);
+        ICTMTransition transition = _mockTransition(
+            Utils.TEST_GENESIS_REGISTRY,
+            0,
+            claimedVersion,
+            _releaseAt(releaseVersion)
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(ReleaseProtocolVersionMismatch.selector, claimedVersion, releaseVersion)
+        );
+        vm.prank(governor);
+        chainContractAddress.setNewVersionUpgradeFromTransition(transition);
+    }
+
+    /// @dev The transition is mocked: a real `CTMTransition` reads its target's version off
+    ///      `newRelease` at construction, so it can never name a zero one.
+    function test_revertWhen_theTransitionNamesNoRelease() public {
+        ICTMTransition transition = _mockTransition(Utils.TEST_GENESIS_REGISTRY, 0, NEW_VERSION, address(0));
+
+        vm.expectRevert(ZeroAddress.selector);
+        vm.prank(governor);
+        chainContractAddress.setNewVersionUpgradeFromTransition(transition);
+
+        assertEq(chainContractAddress.currentRelease(), Utils.TEST_GENESIS_REGISTRY, "the release did not move");
+        assertEq(chainContractAddress.protocolVersion(), 0, "nor did the version");
+    }
+
+    /// @dev Every chain created from a release with a zero genesis batch hash would get an unusable
+    ///      batch zero. A real `CTMRelease` refuses one at construction, so the release is mocked
+    ///      here to isolate the CTM's own check.
+    function test_revertWhen_theTransitionsReleaseHasNoGenesisBatchHash() public {
+        address newRelease = _releaseAt(NEW_VERSION);
+        vm.mockCall(
+            newRelease,
+            abi.encodeWithSelector(ICTMRelease.genesisParams.selector),
+            abi.encode(makeAddr("genesisUpgrade"), bytes32(0), uint64(1))
+        );
+        ICTMTransition transition = _mockTransition(Utils.TEST_GENESIS_REGISTRY, 0, NEW_VERSION, newRelease);
+
+        vm.expectRevert(GenesisBatchHashZero.selector);
+        vm.prank(governor);
+        chainContractAddress.setNewVersionUpgradeFromTransition(transition);
+
+        assertEq(chainContractAddress.currentRelease(), Utils.TEST_GENESIS_REGISTRY, "the release did not move");
+        assertEq(chainContractAddress.protocolVersion(), 0, "nor did the version");
+        assertEq(chainContractAddress.upgradeTransition(0), address(0), "nor was the edge committed");
     }
 }

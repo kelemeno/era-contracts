@@ -389,8 +389,8 @@ fn construct_from_record(
         if immutable.recorded.is_zero() {
             bindings_reviewed = false;
             result.report_error(&format!(
-                "{label}: its record says it was built over a zero {}, which its constructor no \
-                 longer refuses: the executor could administer nothing",
+                "{label}: its record says it was built over a zero {}, which its constructor \
+                 refuses: the record does not describe the deployed executor",
                 immutable.name
             ));
             continue;
@@ -451,7 +451,7 @@ fn missing_record(label: &str, address: Address) -> String {
 /// One immutable as the object answers it, against the reviewed value the construction uses.
 ///
 /// Diagnostic only — the construction check is what decides — except for a zero binding, which
-/// the executor constructors no longer refuse. A reviewed value the package lacks is not compared
+/// is an error here before the comparison. A reviewed value the package lacks is not compared
 /// (the construction then reports itself unverifiable); an unreadable answer was already reported
 /// by `tolerate`.
 fn binding_check(
@@ -915,9 +915,9 @@ mod tests {
         assert!(!reviewed.contains_key(&pair.ctm_executor));
     }
 
-    /// The executor constructors no longer refuse a zero binding, so a zero is an error here even
-    /// where the reviewed value is zero too (a bootstrap manifest's): live and recorded alike, and
-    /// the executor is not established.
+    /// A zero binding is an error here even where the reviewed value is zero too (a bootstrap
+    /// manifest's): live and recorded alike, and the executor is not established. The executor
+    /// constructors refuse one, so such an executor cannot be the deployed one.
     #[tokio::test]
     async fn a_zero_binding_fails_even_against_a_zero_review() {
         let ctm_executor = canonical_create2_address(
