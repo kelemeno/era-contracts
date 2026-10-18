@@ -1010,17 +1010,17 @@
   {
     "contractName": "l1-contracts/RegistryBootstrapMigration",
     "evmBytecodePath": "/l1-contracts/out/RegistryBootstrapMigration.sol/RegistryBootstrapMigration.json",
-    "evmBytecodeHash": "0xac33fcc0a18e637fa3830d5094462d279fad487cbc44b37f5950369636cd1081",
-    "evmDeployedBytecodeHash": "0x368892900034a2dfc6913a9359cb3f69119992b28467da690d1e8ff938dd6821",
-    "evmDeployedBytecodeBlakeHash": "0x0c5ca094b3861b54a7dd23d799a134d0c92a1b2d37a9d9f0f0df2bf216cd739f",
-    "evmDeployedBytecodeLength": 12221
+    "evmBytecodeHash": "0x2c09d3a6f0901574106477c8013016dab9b4dfbaf3f7268d39ce9b97204810dc",
+    "evmDeployedBytecodeHash": "0xff73f9d0a367bf27ac8d86b0c3254e03f8ced79497e9d3839d984a75bc8de577",
+    "evmDeployedBytecodeBlakeHash": "0x52b62d3baad59ecdedab3108b62dec7d4159ac2e898ce99bf07a1a8e3edc1c3b",
+    "evmDeployedBytecodeLength": 15275
   },
   {
     "contractName": "l1-contracts/RegistryBootstrapSequence",
     "evmBytecodePath": "/l1-contracts/out/RegistryBootstrapSequence.sol/RegistryBootstrapSequence.json",
-    "evmBytecodeHash": "0x84f41e0376784df109780bc8d986adc0dfe09dffc6e1f6167f29b70ddd05db45",
-    "evmDeployedBytecodeHash": "0x1ce56f5f3ad6346dfbcd2899abda770528da215193f4bd4131a682821c7187e7",
-    "evmDeployedBytecodeBlakeHash": "0xe2bb8f1218ec34b7a82f66a61b9d470ee1081f0a928215e9544b6c649f0a2c69",
+    "evmBytecodeHash": "0x29c11e6b890e3bb74378a7c08a8830863fc7db5f53b39b420e0de241872b471a",
+    "evmDeployedBytecodeHash": "0x383e50e8a88c5814b827e782e856357c82cac0169b08b46a16bd4226a58651f8",
+    "evmDeployedBytecodeBlakeHash": "0xa22a3cc70b56bde6e1c3040ba70b7a200cd6593b8a5e650086f7a11a539e6246",
     "evmDeployedBytecodeLength": 5477
   },
   {
