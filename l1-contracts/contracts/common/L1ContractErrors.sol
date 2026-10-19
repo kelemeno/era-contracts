@@ -256,6 +256,8 @@ error L2BytecodeNotPublished(bytes32 bytecodeHash);
 error L2BytecodeRowRemoved(uint256 member);
 // 0x4ef29fe3
 error L2BytecodeTableShrunk(uint256 fromLength, uint256 newLength);
+// 0x46b9c0b4
+error L2PlanDelegateNeedsComposer();
 // 0x5493e4b1
 error L2PlanNeedsDelegate();
 // 0xf074914a

@@ -60,6 +60,7 @@ import {
     BootstrapServerNotifierRowMissing,
     L2BytecodeNotPublished,
     L2BytecodeInfoLength,
+    L2PlanDelegateNeedsComposer,
     L2PlanNeedsDelegate,
     L2PlanTooManyFactoryDeps,
     PatchCannotCarryL2Upgrade,
@@ -656,32 +657,6 @@ contract RegistryBootstrapMigrationTest is ChainTypeManagerTest {
         assertEq(keccak256(abi.encode(transaction)), keccak256(abi.encode(_expectedL2Tx(plan, DELEGATE_CALLDATA))));
     }
 
-    /// @dev A zero composer is a legal plan with a delegate target: the delegate is called with
-    ///      EMPTY calldata, there is no composer pin to hold, and the edge commits.
-    function test_composedL2Tx_withoutComposerCallsTheDelegateWithEmptyCalldata() public {
-        AuthoredL2Plan memory plan = _authoredPlan();
-        plan.delegateComposer = address(0);
-        RegistryBootstrapMigration uncomposed = _deployAndAuthorize(_manifestWithL2Plan(plan));
-        L2UpgradePlan memory served = uncomposed.l2Plan();
-        assertEq(served.delegateComposer, address(0), "no composer is served as zero");
-
-        L2CanonicalTransaction memory transaction = uncomposed.l2UpgradeTx(chainId);
-        assertEq(transaction.txType, ZKSYNC_OS_SYSTEM_UPGRADE_L2_TX_TYPE, "the plan still has an L2 side");
-        assertEq(
-            transaction.data,
-            abi.encodeCall(
-                IComplexUpgrader.forceDeployAndUpgradeUniversal,
-                (served.deployments, served.delegateTo, "")
-            ),
-            "without a composer the delegate is called with empty calldata"
-        );
-
-        uint256 oldVersion = chainContractAddress.protocolVersion();
-        L2PlanFixtures.publish(bytecodesSupplier, L2PlanFixtures.codes(DELEGATE_CODE));
-        uncomposed.migrate();
-        assertEq(chainContractAddress.upgradeCutHash(oldVersion), keccak256(abi.encode(uncomposed.upgradeCut())));
-    }
-
     // ─────────────────────────────── final L2 plan ───────────────────────────────
 
     /// @dev The FINAL plan is the genesis release's table-derived set followed by the authored
@@ -1191,6 +1166,18 @@ contract RegistryBootstrapMigrationTest is ChainTypeManagerTest {
         BootstrapManifest memory manifest = _manifestWithL2Plan(plan);
 
         vm.expectRevert(L2PlanNeedsDelegate.selector);
+        new RegistryBootstrapMigration(manifest);
+    }
+
+    /// @dev Without a composer the delegate would be called with EMPTY calldata, which the upgrade
+    ///      delegate rejects on every chain (see `ComposedL2UpgradeTxExecution.t.sol`).
+    function test_revertWhen_delegateWithoutComposer() public {
+        AuthoredL2Plan memory plan = _authoredPlan();
+        plan.delegateComposer = address(0);
+
+        BootstrapManifest memory manifest = _manifestWithL2Plan(plan);
+
+        vm.expectRevert(L2PlanDelegateNeedsComposer.selector);
         new RegistryBootstrapMigration(manifest);
     }
 

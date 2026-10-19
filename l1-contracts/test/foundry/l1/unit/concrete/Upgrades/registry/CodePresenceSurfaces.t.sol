@@ -8,6 +8,7 @@ import {
 } from "@openzeppelin/contracts-v4/proxy/transparent/TransparentUpgradeableProxy.sol";
 
 import {CTMUpgradeExecutorFixture} from "./CTMUpgradeExecutor.t.sol";
+import {L2PlanFixtures} from "./L2PlanFixtures.sol";
 import {CTMTransition} from "contracts/upgrades/registry/objects/CTMTransition.sol";
 import {ProxyUpgradeTransition} from "contracts/upgrades/registry/objects/ProxyUpgradeTransition.sol";
 import {RegistryTargetHasNoCode} from "contracts/common/L1ContractErrors.sol";
@@ -37,8 +38,8 @@ contract ValidateTargetNew {
 ///         transition's rows are code-checked when applied, all of them before the first swap
 ///         (`ProxyUpgradeRowLib.applyRows`). See
 ///         {protocol-docs/ecosystem-upgrade.md#where-each-check-lives}.
-/// @dev The transition under test names its optional delegate composer, so the full list is
-///      exercised.
+/// @dev The transition under test has a delegate and therefore names its delegate composer, so
+///      the full list is exercised.
 contract CodePresenceSurfacesTest is CTMUpgradeExecutorFixture {
     /// @dev `diamondInit`, `genesisUpgrade`, `verifier` — the release members that are not facets.
     uint256 internal constant RELEASE_FIXED_MEMBERS = 3;
@@ -71,17 +72,22 @@ contract CodePresenceSurfacesTest is CTMUpgradeExecutorFixture {
         IValidatable(address(fullTransition)).validate();
     }
 
-    /// @dev The optional-zero member stays legal: a transition with no composer still validates,
-    ///      so the code check is not silently turned into "every slot must be filled".
-    function test_transitionWithoutComposerValidates() public {
+    /// @dev The composer is zero exactly on an L1-only edge (no delegate), and such a transition
+    ///      still validates, so the code check is not silently turned into "every slot must be
+    ///      filled". The target release differs from the departing one in its version only, as an
+    ///      edge without an L2 side requires.
+    function test_l1OnlyTransitionWithoutComposerValidates() public {
         TransitionManifest memory manifest = _transitionManifest(
             778,
             chainContractAddress.currentRelease(),
             L2_DELEGATE_CODE
         );
-        manifest.l2Plan.delegateComposer = address(0);
-        CTMTransition uncomposed = new CTMTransition(manifest);
-        uncomposed.validate();
+        manifest.newRelease = address(_deployRelease(1, newVersion));
+        manifest.l2Plan = L2PlanFixtures.emptyPlan();
+        CTMTransition l1Only = new CTMTransition(manifest);
+        assertEq(l1Only.l2Plan().delegateComposer, address(0), "an L1-only plan names no composer");
+        assertEq(l1Only.l2Plan().delegateTo, address(0), "an L1-only plan has no delegate");
+        l1Only.validate();
     }
 
     // ─────────────────────────────── every named member ───────────────────────────────

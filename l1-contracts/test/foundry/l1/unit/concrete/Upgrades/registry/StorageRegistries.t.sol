@@ -35,6 +35,7 @@ import {
     L2BytecodeInfoLength,
     L2BytecodeRowRemoved,
     L2BytecodeTableShrunk,
+    L2PlanDelegateNeedsComposer,
     L2PlanNeedsDelegate,
     L2PlanTooManyFactoryDeps,
     PatchCannotCarryL2Upgrade,
@@ -958,23 +959,15 @@ contract StorageRegistriesTest is Test {
         committed.validate();
     }
 
-    /// @dev A zero composer is a legal plan with a delegate target: the delegate is called with
-    ///      EMPTY calldata, and there is no composer to require code at.
-    function test_zeroDelegateComposerComposesEmptyDelegateCalldata() public {
+    /// @dev Without a composer the delegate would be called with EMPTY calldata, which the upgrade
+    ///      delegate rejects on every chain (see `ComposedL2UpgradeTxExecution.t.sol`), so the
+    ///      transition refuses to exist.
+    function test_revertWhen_delegateWithoutComposer() public {
         TransitionManifest memory manifest = _transitionManifest();
         manifest.l2Plan.delegateComposer = address(0);
-        CTMTransition uncomposed = new CTMTransition(manifest);
-        assertEq(uncomposed.l2Plan().delegateComposer, address(0), "no composer is served as zero");
-        uncomposed.validate();
 
-        L2CanonicalTransaction memory transaction = _l2Tx(uncomposed);
-        L2UpgradePlan memory plan = uncomposed.l2Plan();
-        assertEq(transaction.txType, ZKSYNC_OS_SYSTEM_UPGRADE_L2_TX_TYPE, "the plan still has an L2 side");
-        assertEq(
-            transaction.data,
-            abi.encodeCall(IComplexUpgrader.forceDeployAndUpgradeUniversal, (plan.deployments, plan.delegateTo, "")),
-            "without a composer the delegate is called with empty calldata"
-        );
+        vm.expectRevert(L2PlanDelegateNeedsComposer.selector);
+        new CTMTransition(manifest);
     }
 
     // ─────────────────────────── derived L2 deployments ───────────────────────────
