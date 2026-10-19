@@ -6,9 +6,9 @@ import {EnumerableMap} from "@openzeppelin/contracts-v4/utils/structs/Enumerable
 
 import {ChainTypeManager} from "../../state-transition/ChainTypeManager.sol";
 
-/// @title DummyExecutor
-/// @notice A test smart contract implementing the IExecutor interface to simulate Executor behavior for testing purposes.
-contract DummyChainTypeManagerWBH is ChainTypeManager {
+/// @title MockChainTypeManagerWBH
+/// @notice A ChainTypeManager over a given Bridgehub, for the Bridgehub unit tests.
+contract MockChainTypeManagerWBH is ChainTypeManager {
     using EnumerableMap for EnumerableMap.UintToAddressMap;
 
     address internal zkChain;

@@ -74,11 +74,15 @@ yarn test:upgrade-recurring   # the recurring registry-driven hop on the current
 
 `yarn test:upgrade` reviews each package the way governance would before replaying it:
 `protocol-ops ecosystem verify-package` against the live anvil L1, with `--env local`, the
-fixture's governance as `--expected-governance-owner` and, for the hops, the bootstrap package as
+fixture's Bridgehub as `--expected-bridgehub` (`local` names another ecosystem's), the fixture's
+governance as `--expected-governance-owner` and, for the hops, the bootstrap package as
 `--executor-record`. It holds the deployments against the hashes of the build it deployed from
 (`scripts/calculate-hashes.ts --output`, passed as `--contract-hashes`), because the committed
-`AllContractsHashes.json` is regenerated last. Every prepare deploys under a salt of its own, as
-production rotates its salt per release, so the recurring hop's `L1MessageRoot` row really applies.
+`AllContractsHashes.json` is regenerated last. Beyond a report without errors, the harness requires
+every construction record the package carries to be consulted (each deployment of these prepares is
+a member the package installs) and, for the bootstrap, the freeze-authority check. Every prepare
+deploys under a salt of its own, as production rotates its salt per release, so the recurring hop's
+`L1MessageRoot` row really applies.
 
 The pipeline caps each replayed L1 prepare/governance transaction at EIP-7825's 16,777,216 gas
 limit and logs its phase, bundle, index, target, hash and gas usage. Per-chain L1 upgrade calls

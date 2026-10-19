@@ -16,7 +16,7 @@ import {Utils} from "foundry-test/l1/unit/concrete/Utils/Utils.sol";
 /// @dev The pre-v35 implementation is not part of this build, so the stand-in writes through the
 ///      declarations the current implementation retains. That they sit where the v34 layout put
 ///      them is what the slot assertions of {ChainTypeManagerLegacyStorageTest} pin.
-contract PreV35ChainTypeManagerStandIn is ChainTypeManager {
+contract MockPreV35ChainTypeManager is ChainTypeManager {
     constructor(
         address _bridgehub,
         address _interopCenter,
@@ -60,11 +60,11 @@ contract ChainTypeManagerLegacyStorageTest is ChainTypeManagerTest {
     uint256 internal constant LEGACY_VERSION = uint256(34) << 32;
     uint256 internal constant NEW_VERSION = uint256(1) << 32;
 
-    PreV35ChainTypeManagerStandIn internal preV35Implementation;
+    MockPreV35ChainTypeManager internal preV35Implementation;
 
     function setUp() public {
         deploy();
-        preV35Implementation = new PreV35ChainTypeManagerStandIn(
+        preV35Implementation = new MockPreV35ChainTypeManager(
             address(bridgehub),
             interopCenterAddress,
             address(bytecodesSupplier),
@@ -83,11 +83,8 @@ contract ChainTypeManagerLegacyStorageTest is ChainTypeManagerTest {
     function _writePreV35StateThenSwap(address _verifier, address _defaultUpgrade) internal {
         _swapImplementation(address(preV35Implementation));
         vm.startPrank(governor);
-        PreV35ChainTypeManagerStandIn(address(chainContractAddress)).setProtocolVersionVerifier(
-            LEGACY_VERSION,
-            _verifier
-        );
-        PreV35ChainTypeManagerStandIn(address(chainContractAddress)).setDefaultUpgrade(_defaultUpgrade);
+        MockPreV35ChainTypeManager(address(chainContractAddress)).setProtocolVersionVerifier(LEGACY_VERSION, _verifier);
+        MockPreV35ChainTypeManager(address(chainContractAddress)).setDefaultUpgrade(_defaultUpgrade);
         vm.stopPrank();
         _swapImplementation(address(chainTypeManager));
     }

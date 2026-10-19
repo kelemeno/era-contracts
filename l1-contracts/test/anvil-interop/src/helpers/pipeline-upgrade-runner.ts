@@ -111,6 +111,12 @@ const anvilInteropDir = path.resolve(__dirname, "../..");
 const l1ContractsDir = path.resolve(anvilInteropDir, "../..");
 const contractsRootDir = path.resolve(l1ContractsDir, "..");
 
+// What `verify-bootstrap` / `verify-package` print for the outcomes the harness holds them to.
+const UNCONSULTED_RECORDS_REPORT = "recorded deployment(s) no check of this review consulted";
+const FREEZE_AUTHORITY_REPORT = "so freezing the CTM's chains directly answers to the executors' governance";
+// Upper bound on a verifier report the harness reads back.
+const PROTOCOL_OPS_REPORT_MAX_BYTES = 64 * 1024 * 1024;
+
 // Function selectors for the ComplexUpgrader entry points.
 const SELECTORS = {
   // forceDeployAndUpgrade((bytes32,address,bool,uint256,bytes)[],address,bytes) — Era
@@ -304,6 +310,7 @@ export async function runPipelineUpgradeScenario(scenario: PipelineUpgradeScenar
       rpcUrl: l1Chain.rpcUrl,
       ecosystemToml: mergedEcosystemToml,
       governance: l1Addresses.governance,
+      bridgehub: l1Addresses.bridgehub,
       reviewedBuildHashes,
       executorRecords: [],
     });
@@ -594,6 +601,7 @@ async function runRecurringHop(
       rpcUrl: ctx.rpcUrl,
       ecosystemToml: mergedEcosystemToml,
       governance: ctx.l1Addresses.governance,
+      bridgehub: ctx.l1Addresses.bridgehub,
       reviewedBuildHashes: ctx.reviewedBuildHashes,
       executorRecords: [ctx.executorRecords],
     });
@@ -913,6 +921,28 @@ function runProtocolOps(args: string[], extraEnv?: Record<string, string>): void
   }
 }
 
+/** {@link runProtocolOps}, echoing what it printed on stdout and returning it. */
+function runProtocolOpsForReport(args: string[]): string {
+  const result = spawnSync("./protocol-ops.sh", args, {
+    cwd: contractsRootDir,
+    stdio: ["inherit", "pipe", "inherit"],
+    encoding: "utf8",
+    maxBuffer: PROTOCOL_OPS_REPORT_MAX_BYTES,
+    env: {
+      ...process.env,
+      PROTOCOL_CONTRACTS_ROOT: contractsRootDir,
+    },
+  });
+  process.stdout.write(result.stdout ?? "");
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    throw new Error(`protocol-ops failed: ${args.join(" ")}`);
+  }
+  return result.stdout;
+}
+
 /**
  * Writes the hashes of the build that deploys this scenario's objects (`scripts/calculate-hashes.ts
  * --output`), for `verify-package --contract-hashes`. The committed `AllContractsHashes.json` is
@@ -934,20 +964,24 @@ function writeReviewedBuildHashes(outputPath: string): void {
 /**
  * `protocol-ops ecosystem verify-bootstrap` / `verify-package` (one command, two names) on a merged
  * prepare output, run the way a reviewer runs it before governance signs: against the live L1, the
- * reviewed governance owner and the `local` env's permanent values. Throws when the verifier reports
- * any error.
+ * reviewed governance owner and the `local` env's permanent values. The fixture's Bridgehub is not the
+ * one `local` names, so it is the reviewer's `--expected-bridgehub`. Throws when the verifier reports
+ * any error, when it reports a construction record no check consulted (every deployment of these
+ * prepares is a member the package installs, so an unconsulted one means a check was skipped), and
+ * for the bootstrap when the report lacks the freeze-authority check.
  */
 function verifyPackageAsReviewed(params: {
   command: "verify-bootstrap" | "verify-package";
   rpcUrl: string;
   ecosystemToml: string;
   governance: string;
+  bridgehub: string;
   reviewedBuildHashes: string;
   /** Files carrying `[upgrade_executors]` records the package itself does not carry. */
   executorRecords: string[];
 }): void {
   console.log(`\n── ${params.command}: reviewing the package before governance replays it ──`);
-  runProtocolOps([
+  const report = runProtocolOpsForReport([
     "ecosystem",
     params.command,
     "--ecosystem-toml",
@@ -958,10 +992,18 @@ function verifyPackageAsReviewed(params: {
     params.governance,
     "--env",
     "local",
+    "--expected-bridgehub",
+    params.bridgehub,
     "--contract-hashes",
     params.reviewedBuildHashes,
     ...params.executorRecords.flatMap((record) => ["--executor-record", record]),
   ]);
+  if (report.includes(UNCONSULTED_RECORDS_REPORT)) {
+    throw new Error(`${params.command} left construction records unconsulted (see its report above)`);
+  }
+  if (params.command === "verify-bootstrap" && !report.includes(FREEZE_AUTHORITY_REPORT)) {
+    throw new Error("verify-bootstrap did not establish who may freeze the CTM's chains");
+  }
 }
 
 function safeBundlesInDir(dir: string): Array<{ file: string; target: string }> {
@@ -1060,8 +1102,9 @@ export async function runEcosystemUpgradeScripts(params: {
       ANVIL_DEFAULT_ACCOUNT_ADDR,
       "--ctm-proxy",
       params.upgradeHarnessInputs.ctmProxyAddress,
-      "--rollup-da-manager-address",
-      params.upgradeHarnessInputs.rollupDaManagerAddress,
+      ...(params.upgradeHarnessInputs.rollupDaManagerAddress
+        ? ["--rollup-da-manager-address", params.upgradeHarnessInputs.rollupDaManagerAddress]
+        : []),
       "--create2-factory-salt",
       params.upgradeHarnessInputs.create2FactorySalt,
       "--upgrade-input-path",
@@ -1593,6 +1636,11 @@ function replaceTomlBareValue(contents: string, key: string, value: string): str
   return pattern.test(contents) ? contents.replace(pattern, `$1${value}`) : `${key} = ${value}\n${contents}`;
 }
 
+/** `address`, unless it is absent or the zero address a template leaves for "unset". */
+function nonZeroAddress(address: string | undefined): string | undefined {
+  return address && !ethers.BigNumber.from(address).isZero() ? address : undefined;
+}
+
 export function prepareUpgradeHarnessInputs(
   scenario: PipelineUpgradeScenario,
   state: {
@@ -1608,7 +1656,8 @@ export function prepareUpgradeHarnessInputs(
   bridgehubAddress: string;
   protocolOpsOutDir: string;
   upgradeInputArg: string;
-  rollupDaManagerAddress: string;
+  /** The template's `rollup_da_manager` when it names one; otherwise protocol-ops resolves the CTM's own. */
+  rollupDaManagerAddress?: string;
   create2FactorySalt: string;
   isZKsyncOS: boolean;
   ctmProxyAddress: string;
@@ -1673,7 +1722,7 @@ export function prepareUpgradeHarnessInputs(
     bridgehubAddress: state.l1Addresses.bridgehub,
     protocolOpsOutDir,
     upgradeInputArg: `/${path.relative(l1ContractsDir, upgradeInputPath)}`,
-    rollupDaManagerAddress: permanentValuesToml.ctm_contracts?.rollup_da_manager ?? ethers.constants.AddressZero,
+    rollupDaManagerAddress: nonZeroAddress(permanentValuesToml.ctm_contracts?.rollup_da_manager),
     create2FactorySalt: permanentValuesToml.permanent_contracts?.create2_factory_salt ?? ethers.constants.HashZero,
     isZKsyncOS: scenario.isZKsyncOS,
     ctmProxyAddress: state.ctmAddresses.chainTypeManager,

@@ -17,8 +17,8 @@
 //! and the length — to match ([`super::construction::ReviewedArtifact::is_runtime_of`]). That
 //! proves the account runs the reviewed CODE; the VALUES in the masked slots are the deploying
 //! constructor's, and this module says nothing about them. For the objects a package names that
-//! is closed by their construction ([`super::construction`]); for the members those objects name
-//! it is the limit of this check (see the module docs of [`super::members`]).
+//! is closed by their construction ([`super::construction`]); for each member a package newly
+//! installs, by its construction record ([`super::member_construction`]).
 //!
 //! Code the build does not produce for the expected contract is an error — never a warning that
 //! could accompany a successful review.

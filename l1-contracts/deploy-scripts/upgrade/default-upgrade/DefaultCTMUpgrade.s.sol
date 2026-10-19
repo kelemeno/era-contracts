@@ -892,6 +892,7 @@ contract DefaultCTMUpgrade is Script, DeployCTMScript {
         // does not exist in the file yet, so append sections by re-serializing into the same
         // "root" object and rewriting the whole file instead.
         vm.serializeString("root", "external_actions", externalActionEntries());
+        serializeMemberDeployments();
         string memory updatedToml = vm.serializeString("root", "governance_calls", governanceCallsSerialized);
         vm.writeToml(updatedToml, upgradeConfig.outputPath);
     }
@@ -929,6 +930,7 @@ contract DefaultCTMUpgrade is Script, DeployCTMScript {
         );
 
         // See the note in prepareDefaultGovernanceCalls on why keyed writeToml is not used here.
+        serializeMemberDeployments();
         string memory updatedCtmAdminToml = vm.serializeString("root", "ctm_admin_calls", ctmAdminCallsSerialized);
         vm.writeToml(updatedCtmAdminToml, upgradeConfig.outputPath);
     }
@@ -1092,6 +1094,7 @@ contract DefaultCTMUpgrade is Script, DeployCTMScript {
         if (recorded) {
             vm.serializeString("root", "upgrade_executors", executorsRecord);
         }
+        serializeMemberDeployments();
         // The salt this run's CREATE2 deployments used, so a reviewer re-derives its objects
         // without being told it out of band.
         vm.serializeBytes32("root", "create2_factory_salt", _create2FactorySalt);

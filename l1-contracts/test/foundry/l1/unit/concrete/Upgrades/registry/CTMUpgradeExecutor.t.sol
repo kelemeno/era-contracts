@@ -2,6 +2,8 @@
 
 pragma solidity 0.8.28;
 
+import {Vm} from "forge-std/Vm.sol";
+
 import {ChainTypeManagerTest} from "../../state-transition/ChainTypeManager/_ChainTypeManager_Shared.t.sol";
 import {UtilsFacet} from "../../Utils/UtilsFacet.sol";
 
@@ -584,6 +586,8 @@ contract CTMUpgradeExecutorTest is CTMUpgradeExecutorFixture {
 
     /// @dev Governance no longer owns the CTM, so the only route to these owner operations is
     ///      the executor's `forward` (whose own gate is `test_revertWhen_forwardCalledByStranger`).
+    ///      Freezing and unfreezing are the exception, open to governance as the Bridgehub's owner
+    ///      (`test_bridgehubOwnerFreezesAndUnfreezesWithoutTheExecutor`).
     function test_revertWhen_ctmOwnerOperationsCalledDirectlyByGovernance() public {
         address newValidator = makeAddr("newValidator");
         address newTimelock = makeAddr("validatorTimelockPostV29");
@@ -592,10 +596,6 @@ contract CTMUpgradeExecutorTest is CTMUpgradeExecutorFixture {
         UtilsFacet(chainAddress).util_setPriorityModeActivated(true);
 
         vm.startPrank(governor);
-        vm.expectRevert("Ownable: caller is not the owner");
-        chainContractAddress.freezeChain(chainId);
-        vm.expectRevert("Ownable: caller is not the owner");
-        chainContractAddress.unfreezeChain(chainId);
         vm.expectRevert("Ownable: caller is not the owner");
         chainContractAddress.revertBatches(chainId, 0);
         vm.expectRevert("Ownable: caller is not the owner");
@@ -611,11 +611,60 @@ contract CTMUpgradeExecutorTest is CTMUpgradeExecutorFixture {
         vm.stopPrank();
 
         // Nothing reached the chain or the CTM.
-        assertFalse(IGetters(chainAddress).isDiamondStorageFrozen());
         assertFalse(IGetters(chainAddress).isValidator(newValidator));
         assertEq(IGetters(chainAddress).getPriorityTxMaxGasLimit(), oldLimit);
         assertTrue(UtilsFacet(chainAddress).util_getPriorityModeActivated());
         assertEq(chainContractAddress.validatorTimelockPostV29(), oldTimelock);
+    }
+
+    /// @notice The Bridgehub's owner — `governor`, as on every PUH ecosystem — freezes and unfreezes
+    ///         a chain of the executor-owned CTM directly, the route the Security Council's freeze
+    ///         takes ({protocol-docs/ecosystem-upgrade-coordination.md#freezing-a-chain}). The
+    ///         executor is not involved: it forwards nothing and keeps the CTM.
+    function test_bridgehubOwnerFreezesAndUnfreezesWithoutTheExecutor() public {
+        assertEq(bridgehub.owner(), governor, "fixture: governance owns the Bridgehub");
+        assertFalse(IGetters(chainAddress).isDiamondStorageFrozen());
+
+        vm.recordLogs();
+        vm.expectEmit(true, true, true, true, chainAddress);
+        emit IAdmin.Freeze();
+        vm.prank(governor);
+        chainContractAddress.freezeChain(chainId);
+        assertTrue(IGetters(chainAddress).isDiamondStorageFrozen(), "the freeze must land on the chain diamond");
+
+        vm.expectEmit(true, true, true, true, chainAddress);
+        emit IAdmin.Unfreeze();
+        vm.prank(governor);
+        chainContractAddress.unfreezeChain(chainId);
+        assertFalse(IGetters(chainAddress).isDiamondStorageFrozen(), "the unfreeze must land on the chain diamond");
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; ++i) {
+            assertTrue(logs[i].emitter != address(ctmExecutor), "the executor forwarded nothing");
+        }
+        assertEq(chainContractAddress.owner(), address(ctmExecutor), "and still owns the CTM");
+    }
+
+    /// @notice The direct route follows the Bridgehub's ownership, not the executor's: once the
+    ///         Bridgehub has another owner, governance reaches freezing only through `forward`.
+    function test_revertWhen_governanceNoLongerOwnsTheBridgehub() public {
+        address otherBridgehubOwner = makeAddr("otherBridgehubOwner");
+        vm.prank(governor);
+        bridgehub.transferOwnership(otherBridgehubOwner);
+        vm.prank(otherBridgehubOwner);
+        bridgehub.acceptOwnership();
+
+        vm.prank(governor);
+        vm.expectRevert(abi.encodeWithSelector(Unauthorized.selector, governor));
+        chainContractAddress.freezeChain(chainId);
+        assertFalse(IGetters(chainAddress).isDiamondStorageFrozen(), "the refused freeze did not land");
+
+        _forwardToCTM(abi.encodeCall(IChainTypeManager.freezeChain, (chainId)));
+        assertTrue(IGetters(chainAddress).isDiamondStorageFrozen(), "the executor route still works");
+        vm.prank(governor);
+        vm.expectRevert(abi.encodeWithSelector(Unauthorized.selector, governor));
+        chainContractAddress.unfreezeChain(chainId);
+        assertTrue(IGetters(chainAddress).isDiamondStorageFrozen(), "the refused unfreeze did not land");
     }
 
     /// @dev Governance's one call into the bound CTM, through the executor's `forward`, asserting

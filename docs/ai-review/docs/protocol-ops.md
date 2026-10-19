@@ -75,11 +75,28 @@ from calldata:
   verifier already in force where the upgrade departs from (the departing release's, or the one the
   CTM's chains run for the bootstrap), which a release carries over without redeploying and an
   earlier build may have produced. `ZiskVerifier`'s snarkJS Plonk backend is outside the
-  repository's build and fails the run. L2 members are ZKsync OS bytecode infos held against the
+  repository's build, so the code at its `PLONK_VERIFIER()` must hash to a runtime pinned in
+  `tools/verifier-gen/data/ZiSK_plonk_backend.toml` (`external_backends.rs`); no code, no applicable
+  pin or another hash fails the run. L2 members are ZKsync OS bytecode infos held against the
   reviewed hashes' `(blake2s, length, keccak256)`: each L2 table row the contract of its
   `L2EcosystemContract` slot, the shell `SystemContractProxy`, a plan's delegate `L2DefaultUpgrade`,
-  each extra bytecode some reviewed contract. What this cannot cover: the values in a member's
-  immutable slots (a facet built over another chain id runs the reviewed code).
+  each extra bytecode some reviewed contract.
+- **Member construction** (`member_construction.rs`) — every L1 member a package NEWLY installs (a
+  release member the departing release does not name — at the bootstrap anything but the verifier
+  the chains run and its tree — every engine and composer, each row's `implNew`, the implementation
+  behind a proxy the package introduces) is re-derived from the prepare's `[member_deployments]`
+  record: the reviewed creation code on the recorded, exactly-ABI-encoded arguments under the
+  recorded salt through the deterministic factory must land at the member. Each argument is held
+  against the source the prepare read (`CONSTRUCTOR_EXPECTATIONS`): the RPC's chain id, the env's
+  `testnet_verifier`, the reviewed Bridgehub (the env's `bridgehub_proxy_addr` or
+  `--expected-bridgehub`, which the package's CTM and `bridgehub_proxy_addr` must agree with) and
+  the proxies, WETH token, owner and chain cap read through it, the rollup DA manager of a chain on
+  the CTM (and the env's, which must agree), a deployed reviewed `EIP7702Checker`, the sub-verifiers
+  the walk read, the CTM immutables the row check established — never a package value. A missing
+  record, a record that does not re-derive, a wrong or unestablished argument, a parameter without
+  an expectation all fail. What this cannot cover: the values in a CARRIED-OVER member's immutable
+  slots, accepted by the review that installed it (none for a release `ctm init` deployed), and
+  the `initialize` calldata of a proxy the package introduces.
 - **Inventory slots** (`rows.rs`) — every participating proxy row names the proxy of its slot
   (`L1EcosystemContract` / `CTMContract` member `i`), discovered on chain through the Bridgehub and
   the getters it links (asset router, nullifier, NTV, message root, CTM deployment tracker, chain
@@ -89,13 +106,18 @@ from calldata:
   that, the inventory must be exactly its enum's length with at least one participating row, and
   every participating row a real edge: nonzero `proxy` and `expectedOldImpl`, an `implNew` other
   than `expectedOldImpl`, no proxy twice. A new `ChainTypeManager` implementation's constructor
-  immutables, which code identity masks, are held by value against the live CTM or the package's
-  CTM-domain proxies.
+  immutables, which code identity masks, are held by value against the live CTM, else the
+  inventory row of their slot, else a proxy the package introduces that runs the reviewed
+  `TransparentUpgradeableProxy` with the CTM-domain ProxyAdmin in its EIP-1967 admin slot and the
+  slot's reviewed contract behind it (`BRIDGE_HUB` has no fallback) — through its getters, and
+  again through its construction record (its `_bridgehub` against the reviewed Bridgehub), as is
+  every `implNew` (member construction above).
 - **Bound authority** — the domain executors the legs run through (the CTM executor's immutable
   CTM and `ProxyAdmin` held against the package's independently reviewed CTM and `ProxyAdmin`, the
   core executor's against the ecosystem `ProxyAdmin`), the CTM and both ProxyAdmins, and the
   governance owner the whole lifecycle answers to, with no ownership nomination outstanding on any
-  of them. The reviewed owner is what the executors' current ownership is checked against, so for
+  of them; for a bootstrap also the owner of the CTM's Bridgehub, which the CTM takes chain freezes
+  from too. The reviewed owner is what the executors' current ownership is checked against, so for
   an upgrade package `--expected-governance-owner` is not optional: without it that ownership is
   unverifiable, which is an error.
 - **Departing state** — the version and release edge against live, and every proxy row's

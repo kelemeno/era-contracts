@@ -73,8 +73,12 @@ architecture document).
 - **`CallForwarded(target, value, data)`** on both executors. Every owner operation outside the
   upgrade entrypoints is a `forward` (see the authority matrix in the architecture document), so each
   event must match a call governance approved; anything else is a bypass of the object-driven path.
+  The one exception is a chain's `Freeze` / `Unfreeze` without a `CallForwarded`: the Bridgehub's
+  owner freezing directly, as the Security Council's freeze does
+  ([freezing a chain](../protocol-docs/ecosystem-upgrade-coordination.md#freezing-a-chain)).
 - **Ownership changes** (`OwnershipTransferStarted` / `OwnershipTransferred`) on the executors, the
-  CTM, both `ProxyAdmin`s and the ServerNotifier: expected only during executor succession or
+  CTM, both `ProxyAdmin`s, the ServerNotifier and the Bridgehub (whose owner can freeze the CTM's
+  chains): expected only during executor succession or
   [governance self-migration](governance-self-migration.md).
 
 ## Recovery

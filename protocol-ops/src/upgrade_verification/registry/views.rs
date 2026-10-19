@@ -275,10 +275,11 @@ sol! {
     }
 
     /// The chain registry the bootstrap's lagging-chain report enumerates, the live values a
-    /// release's force deployments are held against, and the ecosystem proxies an inventory's
-    /// slots must name.
+    /// release's force deployments are held against, the ecosystem proxies an inventory's
+    /// slots must name, and the owner a CTM also takes its chain freezes from.
     #[sol(rpc)]
     contract BridgehubView {
+        function owner() external view returns (address);
         function getAllZKChainChainIDs() external view returns (uint256[] memory);
         function chainTypeManager(uint256 _chainId) external view returns (address);
         function assetRouter() external view returns (address);
@@ -290,18 +291,23 @@ sol! {
         function getZKChain(uint256 _chainId) external view returns (address);
     }
 
-    /// A chain's diamond, for the verifier its chain runs today.
+    /// A chain's diamond, for the verifier its chain runs today and the RollupDAManager its Admin
+    /// facet was built over.
     #[sol(rpc)]
     contract ZkChainGettersView {
         function getVerifier() external view returns (address);
+        function getRollupDAManager() external view returns (address);
     }
 
     /// The asset router's links to the nullifier and the native token vault, which an ecosystem
-    /// inventory's slots must name.
+    /// inventory's slots must name, and the WETH token and owner new ecosystem implementations
+    /// are built with.
     #[sol(rpc)]
     contract L1AssetRouterView {
         function L1_NULLIFIER() external view returns (address);
         function nativeTokenVault() external view returns (address);
+        function L1_WETH_TOKEN() external view returns (address);
+        function owner() external view returns (address);
     }
 
     /// The nullifier's link to the interop handler, which an ecosystem inventory's slot must name.

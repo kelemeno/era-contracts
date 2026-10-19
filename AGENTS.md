@@ -18,6 +18,17 @@ Unless the user explicitly asks about the Gateway:
 - Don't extend, refactor or rename Gateway code. Gateway-named identifiers in the core contracts (`migrateToGateway`, `InteropCenter.forwardTransactionOnGateway`, …) are ABI and stay as they are.
 - If a change breaks an existing Gateway test, the smallest fix that keeps it passing is enough.
 
+## Era (EraVM) does not get v34 or later
+
+Era chains and the Era CTM receive nothing from v34 onward; they stay on their own line. Everything on
+`draft/v0.34.0` and later, including the v35 registry-driven upgrade system, is for ZKsync OS only.
+
+Unless the user explicitly asks about Era:
+
+- Don't design, review or test a v34+ change for Era chains, the Era CTM, EraVM-only contracts or Era server
+  consumers (the zksync-era server, EraVM bootloader paths).
+- An Era-only consequence of a v34+ change is not a finding.
+
 ## Code style requirements
 
 1. Avoid using magic numbers. Most constant numbers especially for system params / well known chain ids must be represented as a constant.

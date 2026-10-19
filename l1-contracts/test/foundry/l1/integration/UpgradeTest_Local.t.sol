@@ -45,7 +45,9 @@ import {RegistryBootstrapMigration} from "contracts/upgrades/registry/bootstrap/
 import {RegistryPostState} from "../unit/concrete/Upgrades/registry/RegistryPostState.sol";
 import {L2CanonicalTransactionLib} from "contracts/state-transition/libraries/L2CanonicalTransactionLib.sol";
 import {L2CanonicalTransaction} from "contracts/common/Messaging.sol";
-import {BootstrapManifest, ProxyUpgradeRow} from "contracts/upgrades/registry/RegistryTypes.sol";
+import {BootstrapManifest, ProxyUpgradeRow, ReleaseManifest} from "contracts/upgrades/registry/RegistryTypes.sol";
+import {CTMRelease} from "contracts/upgrades/registry/objects/CTMRelease.sol";
+import {ContractsBytecodesLib} from "../../../../deploy-scripts/utils/bytecode/ContractsBytecodesLib.sol";
 import {CTMContract} from "contracts/upgrades/registry/libraries/ContractIdentifiers.sol";
 import {L1InteropFeeManager} from "contracts/core/interop-fee/L1InteropFeeManager.sol";
 import {IL1InteropFeeManager} from "contracts/core/interop-fee/IL1InteropFeeManager.sol";
@@ -438,6 +440,118 @@ contract UpgradeIntegrationTestLocal is UpgradeIntegrationBootstrapFixture {
             ),
             address(bootstrap.bootstrapSequence()),
             "the sequence re-derives from the migration and the core transition"
+        );
+    }
+
+    /// @notice Every member the bootstrap prepare deploys carries a `[member_deployments]` record in
+    ///         the output of the leg that deployed it, and re-derives from it: the build artifact's
+    ///         creation code and the recorded constructor arguments, under the recorded salt through
+    ///         the deterministic factory, land exactly at the member — the derivation
+    ///         `protocol-ops ecosystem verify-bootstrap` performs (`member_construction`).
+    /// @dev This fixture's CTM is deployed from the current sources, so the prepare reuses every
+    ///      member it was born with (same code, same arguments) and records none for them; they are
+    ///      skipped here. protocol-ops exempts only the verifiers the chains run at a bootstrap, so
+    ///      it would refuse those reused members as unrecorded: a real bootstrap departs from a
+    ///      pre-registry CTM built from earlier sources and redeploys every other member. This test
+    ///      checks the records, not that exemption rule.
+    function test_bootstrapMembersAreReproducibleFromTheirRecords() public view {
+        CTMUpgradeForLocalTest bootstrap = CTMUpgradeForLocalTest(address(ctmUpgrade));
+        string memory root = vm.projectRoot();
+        string memory coreOutput = vm.readFile(string.concat(root, CORE_OUTPUT));
+        string memory ctmOutput = vm.readFile(string.concat(root, CTM_OUTPUT));
+        (, bytes32 coreSalt) = coreUpgrade.getCreate2FactoryParams();
+        (, bytes32 ctmSalt) = ctmUpgrade.getCreate2FactoryParams();
+        BootstrapManifest memory manifest = bootstrap.bootstrapMigration().getManifest();
+        ReleaseManifest memory release = CTMRelease(manifest.currentRelease).getManifest();
+
+        ReleaseManifest memory born = CTMRelease(ctmAddresses.stateTransition.currentRelease).getManifest();
+
+        uint256 facets = release.genesisFacets.length;
+        uint256 recordedFacets = 0;
+        for (uint256 i = 0; i < facets; ++i) {
+            if (_namedBy(born, release.genesisFacets[i].facet)) {
+                continue;
+            }
+            ++recordedFacets;
+            (string memory name, bytes memory args) = _recordedMember(
+                ctmOutput,
+                ctmSalt,
+                release.genesisFacets[i].facet
+            );
+            // The two immutables code identity cannot see, held at their source.
+            if (keccak256(bytes(name)) == keccak256("AdminFacet")) {
+                (uint256 l1ChainId, address rollupDAManager) = abi.decode(args, (uint256, address));
+                assertEq(l1ChainId, block.chainid, "AdminFacet is built for this L1");
+                assertEq(
+                    rollupDAManager,
+                    ctmUpgrade.getAddresses().daAddresses.daContracts.rollupDAManager,
+                    "AdminFacet is built over the prepare's RollupDAManager"
+                );
+            } else if (keccak256(bytes(name)) == keccak256("MailboxFacet")) {
+                (, , , bool isTestnet) = abi.decode(args, (uint256, address, address, bool));
+                assertTrue(isTestnet, "MailboxFacet is built for the env's testnet verifier");
+            }
+        }
+        assertGt(recordedFacets, 0, "the edge deploys facets of its own");
+        if (!_namedBy(born, release.diamondInit)) {
+            _recordedMember(ctmOutput, ctmSalt, release.diamondInit);
+        }
+        // Discovery reports a legacy engine (see `simulateLegacyGenesisEngine`), so the prepare
+        // always deploys the genesis upgrade.
+        _recordedMember(ctmOutput, ctmSalt, release.genesisUpgrade);
+        _recordedMember(ctmOutput, ctmSalt, manifest.upgradeEngine);
+        // The prepare deploys the composer either way; this L1-only fixture's plan names none.
+        assertEq(manifest.l2Plan.delegateComposer, address(0), "an L1-only plan names no composer");
+        uint256 ctmRows = manifest.ctmProxyUpgrades.length;
+        for (uint256 i = 0; i < ctmRows; ++i) {
+            if (manifest.ctmProxyUpgrades[i].implNew != address(0)) {
+                _recordedMember(ctmOutput, ctmSalt, manifest.ctmProxyUpgrades[i].implNew);
+            }
+        }
+        ProxyUpgradeRow[] memory coreRows = coreUpgrade.coreTransition().getManifest().proxyUpgrades;
+        uint256 coreRowCount = coreRows.length;
+        for (uint256 i = 0; i < coreRowCount; ++i) {
+            if (coreRows[i].implNew != address(0)) {
+                _recordedMember(coreOutput, coreSalt, coreRows[i].implNew);
+            }
+        }
+    }
+
+    /// @dev Whether `_release` names `_member` as a facet, its `DiamondInit`, genesis upgrade or verifier.
+    function _namedBy(ReleaseManifest memory _release, address _member) private pure returns (bool) {
+        if (_member == _release.diamondInit || _member == _release.genesisUpgrade || _member == _release.verifier) {
+            return true;
+        }
+        uint256 length = _release.genesisFacets.length;
+        for (uint256 i = 0; i < length; ++i) {
+            if (_release.genesisFacets[i].facet == _member) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// @dev The `[member_deployments]` record of `_member` in `_output`, re-derived: returns the
+    ///      recorded contract and constructor arguments once they are proven to land at `_member`.
+    function _recordedMember(
+        string memory _output,
+        bytes32 _salt,
+        address _member
+    ) private view returns (string memory name, bytes memory args) {
+        string memory key = string.concat("$.member_deployments['", vm.toString(_member), "']");
+        assertTrue(vm.keyExistsToml(_output, key), string.concat("no record of ", vm.toString(_member)));
+        name = _output.readString(string.concat(key, ".contract"));
+        args = _output.readBytes(string.concat(key, ".constructor_args"));
+        assertEq(
+            _output.readAddress(string.concat(key, ".create2_factory")),
+            DeployScriptUtils.DETERMINISTIC_CREATE2_ADDRESS,
+            "recorded through the deterministic factory"
+        );
+        assertEq(_output.readBytes32(string.concat(key, ".create2_salt")), _salt, "recorded under the leg's salt");
+        assertEq(
+            DeployScriptUtils.canonicalCreate2Address(_salt, ContractsBytecodesLib.getCreationCodeEVM(name), args),
+            _member,
+            string.concat(name, " re-derives from its record")
         );
     }
 

@@ -25,7 +25,8 @@ import {ProxyUpgradeDomain} from "../RegistryTypes.sol";
 /// @dev Fixed logic, no generic delegatecall. The transition it commits is the exact deployed
 ///      object governance approved, never a proxy. Every other owner operation of the CTM (freezing
 ///      a chain, moving a deadline, replacing a committed transition, ...) goes through the
-///      owner-gated, event-logged `forward`.
+///      owner-gated, event-logged `forward`; freezing and unfreezing a chain the CTM also takes
+///      from the Bridgehub's owner directly ({ChainTypeManager-freezeChain}).
 contract CTMUpgradeExecutor is UpgradeExecutorBase, ICTMUpgradeExecutor {
     using ObjectAnchorLib for address;
 

@@ -11,6 +11,7 @@ use crate::common::abi::{
 
 pub mod deploy_ctm;
 pub mod deploy_ecosystem;
+pub mod member_deployments;
 pub mod register_chain;
 pub mod upgrade_executors;
 

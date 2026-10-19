@@ -199,7 +199,9 @@ its own), passed with the repeatable `--executor-record`. The record's salt and 
 arguments re-derive the address; its immutable bindings are still held against the package's values,
 and its initial owner is only reported — a fresh ecosystem constructs its executors for the deployer
 and nominates governance. An executor without a record is unverified, which is an error. The live
-owner and pending owner are checked separately, against the reviewed governance. Each write-once object's live code is
+owner and pending owner are checked separately, against the reviewed governance. A bootstrap also requires the CTM's
+Bridgehub to be owned by the manifest's governance, since the CTM takes `freezeChain` / `unfreezeChain` from the
+Bridgehub's owner too ({protocol-docs/ecosystem-upgrade-coordination.md#freezing-a-chain}). Each write-once object's live code is
 also compared with the reviewed build's deployed bytecode of its contract. Every release the package installs is
 held against the reviewed genesis: `genesisBatchHash` against the `genesis_root` of
 `configs/genesis/zksync-os/latest.json`, `genesisIndexRepeatedStorageChanges` against zero, and
@@ -223,7 +225,7 @@ without data) — fails the run before the vote rather than governance's executi
 **What the objects' members run** is held against the reviewed build too. An L1 member's live code
 is compared with the reviewed artifact of each contract its role admits, byte for byte outside the
 artifact's immutable slots (`immutableReferences`) — which proves the code, not the values its
-constructor wrote into those slots:
+constructor wrote into those slots (see the construction records below):
 
 | Member                                                     | Must run                                                                                                                                                                                                                                                                     |
 | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -239,11 +241,43 @@ release's, or for the bootstrap the one the CTM's chains at the departing versio
 an earlier build produced it: the prepare pins the live verifier unless the version deploys one, and
 an unchanged verifier is not something the upgrade changes. Every other member must be this
 build's. `ZiskVerifier`'s snarkJS Plonk backend is built outside this repository, so no reviewed
-build describes it and it fails the run. An L2 member is a ZKsync OS bytecode info, held against
+build describes it: the code at its `PLONK_VERIFIER()` must hash to a runtime pinned in
+`tools/verifier-gen/data/ZiSK_plonk_backend.toml` (next to the verification key it renders; how to
+recompute it is in `l1-contracts/contracts/state-transition/verifiers/README.md`), and no code, no
+applicable pin or another hash fails the run. An L2 member is a ZKsync OS bytecode info, held against
 the reviewed hashes' `(blake2s, length, keccak256)`: each row of a release's L2 table must be the
 bytecode of the contract its `L2EcosystemContract` slot names (`EmptyContract` for the removed
 GWAssetTracker), its system-proxy shell `SystemContractProxy`'s, a plan's delegate
 `L2DefaultUpgrade`'s and each extra bytecode some reviewed contract's.
+
+**Each member the package newly installs is held to its construction record.** Every prepare
+records each contract it deploys through `deploySimpleContract` or as a proxy implementation
+(`[member_deployments]`, merged under `[core]` and `[ctms.*]`: the contract, the CREATE2 factory, the
+salt and the exact constructor arguments). A release member the departing release does not name
+(at the bootstrap: anything but the verifier the chains run, and the sub-verifiers its tree names),
+every engine and composer, each row's `implNew` and the implementation behind a proxy the package
+introduces must have one: the reviewed creation code run on the recorded arguments under the
+recorded salt, through the deterministic factory, must land at the member, and the arguments must be
+exactly their ABI encoding. Each argument is then held against the source the prepare took it from,
+re-read independently — never against anything the package supplies:
+
+| Argument                                                                        | Held against                                                                                                                           |
+| ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| the L1 chain id (facets)                                                        | the RPC's chain id, which must equal the env's `l1_chain_id` when it declares one                                                      |
+| `_isTestnet` (Mailbox, Migrator)                                                | the env's `testnet_verifier`                                                                                                           |
+| a Bridgehub                                                                     | the env's `bridgehub_proxy_addr` (or `--expected-bridgehub`); the package's CTM's `BRIDGE_HUB()` and `bridgehub_proxy_addr` must agree |
+| an ecosystem proxy (chain asset handler, message root, nullifier, asset router) | the live proxy, discovered through that Bridgehub                                                                                      |
+| the WETH token, an ecosystem implementation's owner, the chain cap              | the asset router's `L1_WETH_TOKEN()` and `owner()`, the Bridgehub's `MAX_NUMBER_OF_ZK_CHAINS()`                                        |
+| the Admin facet's RollupDAManager                                               | the env's `rollup_da_manager` for the CTM and the `getRollupDAManager()` of a chain on it, which must agree                            |
+| the Mailbox's EIP-7702 checker                                                  | a deployed reviewed `EIP7702Checker`                                                                                                   |
+| a verifier's sub-verifier                                                       | the address the verifier-tree walk read through its getter                                                                             |
+| a new `ChainTypeManager` implementation's `_bridgehub`                          | the reviewed Bridgehub, as above                                                                                                       |
+| its other four                                                                  | the values its getter check (below) establishes                                                                                        |
+
+A member without a record, a record that does not re-derive, an argument whose source disagrees and
+one nothing establishes each fail the run. The record is untrusted input, so it can only fail: a
+record claiming the expected value for a member built over another does not re-derive. The records
+no check consulted are listed for information.
 
 **Every proxy row names the proxy of its slot.** Row `i` of a Core-domain inventory is
 `L1EcosystemContract` member `i`, of a CTM-domain one or the bootstrap's `CTMContract` member `i`,
@@ -262,12 +296,21 @@ A new `ChainTypeManager` implementation's constructor immutables — `BRIDGE_HUB
 `L1_BYTECODES_SUPPLIER`, `PERMISSIONLESS_VALIDATOR`, `L1_INTEROP_FEE_MANAGER` — are masked by the
 code comparison, so they are read off the implementation and held against the live CTM's own
 getter (unchanged across the swap), else the inventory row of the slot they name, else the proxy
-the package reports for that slot (`[ctms.*.state_transition]`) once the CTM-domain ProxyAdmin is
-shown to administer it and it runs the slot's reviewed contract — a singleton the upgrade
-introduces, like the v35 bootstrap's `L1InteropFeeManager`. `BRIDGE_HUB` falls back to the
-package's `bridgehub_proxy_addr`, `INTEROP_CENTER` to the L2 built-in `L2_INTEROP_CENTER_ADDR`. A
-zero value, or one nothing establishes, fails the run; `PERMISSIONLESS_VALIDATOR` is written into
-every new chain once.
+the package reports for that slot (`[ctms.*.state_transition]`) once it is shown to run the
+reviewed `TransparentUpgradeableProxy`, with the CTM-domain ProxyAdmin in its EIP-1967 admin slot
+and an implementation in its EIP-1967 implementation slot that runs the slot's reviewed contract —
+a singleton the upgrade introduces, like the v35 bootstrap's `L1InteropFeeManager`. Such a proxy's
+`initialize` calldata is not reviewed. `INTEROP_CENTER` falls back to the L2 built-in
+`L2_INTEROP_CENTER_ADDR`; `BRIDGE_HUB` has no fallback. A zero value, or one nothing establishes,
+fails the run; `PERMISSIONLESS_VALIDATOR` is written into every new chain once. The
+implementation's construction record is held against the same values (its `_bridgehub` against the
+reviewed Bridgehub), as an independent second check, and so is the record of the implementation
+behind a reported proxy.
+
+`--expected-bridgehub <address>` replaces the env's `bridgehub_proxy_addr` as the Bridgehub the
+members' arguments are held against. It exists for harnesses whose scratch L1 the env file does not
+describe (the anvil upgrade runner passes the fixture's); a package that will be signed is reviewed
+with the env's.
 
 `--contract-hashes <path>` replaces the committed `AllContractsHashes.json` the local build and the
 live code are held against. It exists for harnesses that verify deployments of an uncommitted build

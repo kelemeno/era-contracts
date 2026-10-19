@@ -35,10 +35,11 @@ use alloy::sol_types::SolCall;
 use anyhow::Context;
 
 use crate::common::external_actions::ExternalAction;
+use crate::common::forge::scripts::member_deployments::MemberDeployments;
 use crate::common::forge::scripts::upgrade_executors::UpgradeExecutorsRecord;
 use crate::common::governance_calls::{decode_calls, GovernanceCall, GovernanceCallsTable};
 
-use super::records::records_in;
+use super::records::{member_records_in, records_in};
 use super::views::{CTMUpgradeExecutorView, CoreUpgradeExecutorView};
 
 /// `RegistryBootstrapMigration.migrate()`.
@@ -359,6 +360,8 @@ pub(crate) struct UpgradePackage {
     /// The executor records the package carries, plus any `--executor-record` the reviewer added
     /// (see [`super::records`]).
     pub(crate) executor_records: UpgradeExecutorsRecord,
+    /// The `[member_deployments]` records of the package's prepares (see [`super::records`]).
+    pub(crate) member_records: MemberDeployments,
 }
 
 impl UpgradePackage {
@@ -402,6 +405,7 @@ impl UpgradePackage {
                 .as_deref()
                 .and_then(|ctm| force_deployments_data_in(root, ctm)),
             executor_records: records_in(root, &ecosystem_toml.display().to_string())?,
+            member_records: member_records_in(root, &ecosystem_toml.display().to_string())?,
             lifecycle,
             ctm_key,
             calls,
@@ -618,6 +622,8 @@ pub(crate) struct BootstrapPackage {
     /// The executor records the package carries (the v35 prepares record the executors they
     /// deploy), plus any `--executor-record` the reviewer added.
     pub(crate) executor_records: UpgradeExecutorsRecord,
+    /// See [`UpgradePackage::member_records`].
+    pub(crate) member_records: MemberDeployments,
 }
 
 fn read_toml(ecosystem_toml: &Path) -> anyhow::Result<toml::Value> {
@@ -824,6 +830,7 @@ impl BootstrapPackage {
             lifecycle: lifecycle_inputs_in(root),
             force_deployments_data: force_deployments_data_in(root, &ctm_key),
             executor_records: records_in(root, &ecosystem_toml.display().to_string())?,
+            member_records: member_records_in(root, &ecosystem_toml.display().to_string())?,
             ctm_key,
         })
     }
@@ -894,6 +901,8 @@ pub(crate) struct ReplacementPackage {
     /// The executor records the reviewer added with `--executor-record` (the prepare deploys no
     /// executor, so the package itself normally carries none).
     pub(crate) executor_records: UpgradeExecutorsRecord,
+    /// See [`UpgradePackage::member_records`]: the replacement's engine is the prepare's.
+    pub(crate) member_records: MemberDeployments,
 }
 
 impl ReplacementPackage {
@@ -951,6 +960,7 @@ impl ReplacementPackage {
                 &["ctms", &ctm_key, "contracts_config", "new_protocol_version"],
             ),
             executor_records: records_in(root, &ecosystem_toml.display().to_string())?,
+            member_records: member_records_in(root, &ecosystem_toml.display().to_string())?,
             ctm_key,
         })
     }

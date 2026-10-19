@@ -53,12 +53,15 @@ use super::lifecycle::{
     verify_executor_owners, verify_lifecycle_construction, CoreExecutorReview, CtmExecutorReview,
     LifecycleBindings, LifecycleReview,
 };
+use super::member_construction::{MemberReview, ReviewedEnv};
 use super::members::{
-    verify_engine_and_l2_plan, verify_release_members, DepartingVerifiers, TRANSITION_ENGINES,
+    verify_engine_and_l2_plan, verify_release_members, DepartingMembers, TRANSITION_ENGINES,
 };
 use super::package::{LegKind, UpgradePackage};
 use super::provenance::{expect_code_identity, expect_code_present, tolerate};
-use super::rows::{participating, verify_inventory, Inventory, InventoryReview};
+use super::rows::{
+    participating, verify_inventory, verify_inventory_construction, Inventory, InventoryReview,
+};
 use super::shell::verify_shell_kept;
 use super::views::{
     BytecodesSupplierView, CTMReleaseView, CTMTransitionView, CommittedUpgradeView, CtmView,
@@ -73,7 +76,9 @@ use super::{format_semver, render_derived_payloads};
 /// ([`verify_lifecycle_construction`]) and owners ([`verify_executor_owners`]); the CTM's and the
 /// CTM-domain ProxyAdmin's owners and the CTM's pending owner (CTM legs), the ecosystem
 /// ProxyAdmin's owner (core leg); the CTM's version and release (transition leg); the
-/// inventories' slots and departures; the transition's readiness and its system-proxy shell.
+/// inventories' slots and departures; the transition's readiness and its system-proxy shell. The
+/// members' construction reads the sources their recorded arguments are held against as it needs
+/// them ([`super::member_construction`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn verify<P: Provider>(
     provider: &P,
@@ -82,10 +87,18 @@ pub(crate) async fn verify<P: Provider>(
     package: &UpgradePackage,
     expected_governance_owner: Option<Address>,
     salts: &[B256],
+    env: &ReviewedEnv,
     result: &mut VerificationResult,
 ) -> anyhow::Result<()> {
     // The set of addresses this run establishes as reviewed, for the calldata check below.
     let mut reviewed: BTreeMap<Address, String> = BTreeMap::new();
+    // The CTM is the package's, held against the CTM executor's binding below.
+    let members = MemberReview::new(
+        &package.member_records,
+        env,
+        package.reported_ctm,
+        package.reported_singletons.bridgehub,
+    );
 
     result.print_info("== Package ==");
     if package.legs.is_empty() {
@@ -173,6 +186,7 @@ pub(crate) async fn verify<P: Provider>(
                 build,
                 ArrivingRelease::Installed(&genesis),
                 result,
+                &members,
                 "the CTM transition",
                 leg.object,
                 salts,
@@ -314,7 +328,7 @@ pub(crate) async fn verify<P: Provider>(
     if let Some(rows) = &infrastructure_rows {
         match bindings.ctm_proxy_admin {
             Some(domain_admin) => {
-                verify_inventory(
+                let outcome = verify_inventory(
                     provider,
                     build,
                     result,
@@ -328,6 +342,7 @@ pub(crate) async fn verify<P: Provider>(
                     },
                 )
                 .await?;
+                verify_inventory_construction(provider, build, result, &members, &outcome).await?;
             }
             None => result.report_error(
                 "the CTM-domain ProxyAdmin is unknown (the CTM executor's CTM_PROXY_ADMIN could \
@@ -339,7 +354,7 @@ pub(crate) async fn verify<P: Provider>(
         match bindings.core_proxy_admin {
             Some(domain_admin) => {
                 let anchor = ecosystem_anchor(provider, result, package, &bindings).await;
-                verify_inventory(
+                let outcome = verify_inventory(
                     provider,
                     build,
                     result,
@@ -353,6 +368,7 @@ pub(crate) async fn verify<P: Provider>(
                     },
                 )
                 .await?;
+                verify_inventory_construction(provider, build, result, &members, &outcome).await?;
             }
             None => result.report_error(
                 "the ecosystem ProxyAdmin is unknown (the core executor's PROXY_ADMIN could not \
@@ -403,6 +419,8 @@ pub(crate) async fn verify<P: Provider>(
     result.print_info("\n== Governance calldata ==");
     let authorities = upgrade_authorities(package, &bindings, &reviewed);
     verify_upgrade_calls(package, &authorities, result);
+
+    members.report_unconsulted(result);
 
     // ── 7. The calls no leg describes ──
     if package.external_actions.is_empty() {
@@ -827,6 +845,7 @@ pub(super) async fn verify_transition<P: Provider>(
     build: &ReviewedBuild,
     arriving: ArrivingRelease<'_>,
     result: &mut VerificationResult,
+    members: &MemberReview<'_>,
     label: &str,
     transition: Address,
     salts: &[B256],
@@ -870,12 +889,13 @@ pub(super) async fn verify_transition<P: Provider>(
             // verified separately — the transition's address commits to the release's ADDRESS,
             // not to its state.
             let departing =
-                DepartingVerifiers::of_release(provider, result, manifest.fromRelease).await;
+                DepartingMembers::of_release(provider, result, manifest.fromRelease).await;
             verify_release(
                 provider,
                 build,
                 genesis,
                 result,
+                members,
                 "the release the transition installs",
                 manifest.newRelease,
                 salts,
@@ -911,6 +931,7 @@ pub(super) async fn verify_transition<P: Provider>(
         provider,
         build,
         result,
+        members,
         label,
         manifest.upgradeEngine,
         TRANSITION_ENGINES,
@@ -949,10 +970,11 @@ pub(super) async fn verify_release<P: Provider>(
     build: &ReviewedBuild,
     genesis: &ReviewedGenesis,
     result: &mut VerificationResult,
+    members: &MemberReview<'_>,
     label: &str,
     release: Address,
     salts: &[B256],
-    departing: &DepartingVerifiers,
+    departing: &DepartingMembers,
     reviewed: &mut BTreeMap<Address, String>,
 ) -> anyhow::Result<()> {
     expect_code_identity(provider, build, result, label, release, &["CTMRelease"]).await?;
@@ -994,7 +1016,10 @@ pub(super) async fn verify_release<P: Provider>(
             row.facet, row.isFreezable
         ));
     }
-    verify_release_members(provider, build, result, label, &manifest, departing).await?;
+    verify_release_members(
+        provider, build, result, members, label, &manifest, departing,
+    )
+    .await?;
     judge_release_genesis(result, label, &manifest, genesis);
     judge_release_validity(
         result,
@@ -1407,6 +1432,7 @@ mod tests {
             },
             force_deployments_data: None,
             executor_records: Default::default(),
+            member_records: Default::default(),
             legs,
             calls,
         }
@@ -2014,6 +2040,7 @@ mod tests {
             &package(Vec::new(), Vec::new()),
             Some(GOVERNANCE),
             &[SALT],
+            &ReviewedEnv::default(),
             &mut result,
         )
         .await
@@ -2090,6 +2117,7 @@ mod tests {
             &package,
             Some(GOVERNANCE),
             &[SALT],
+            &ReviewedEnv::default(),
             &mut result,
         )
         .await
@@ -2138,6 +2166,7 @@ mod tests {
                 &package,
                 Some(GOVERNANCE),
                 &[],
+                &ReviewedEnv::default(),
                 &mut result,
             )
             .await
@@ -2155,5 +2184,231 @@ mod tests {
             outcomes.iter().all(|(_, consumed)| *consumed),
             "both controls must reach the shell check"
         );
+    }
+
+    // ─────────────────── the rows' construction, through the whole path ───────────────────
+    //
+    // `verify` must hold each implementation a row installs to its construction record, with the
+    // members' arguments against the reviewed Bridgehub that the package's CTM and
+    // `bridgehub_proxy_addr` must agree with. The transport is mocked to isolate that wiring: the
+    // executors carry no records and are unverifiable in every run alike, so each run differs from
+    // its control by exactly the finding it drives.
+
+    use super::super::construction::DETERMINISTIC_CREATE2_FACTORY;
+    use crate::common::forge::scripts::member_deployments::{
+        MemberDeploymentRecord, MemberDeployments,
+    };
+
+    const BRIDGEHUB: Address = Address::repeat_byte(0xB0);
+    const ROW_PROXY: Address = Address::repeat_byte(0x9C);
+    const OLD_IMPL: Address = Address::repeat_byte(0x01);
+    const ROW_RUNTIME: &[u8] = b"the reviewed runtime of the row's contract";
+
+    /// A participating row of `contract`, built over `bridgehub` (its only constructor argument),
+    /// in `slot` of a `domain` inventory of `slots` slots; with the package calling it through
+    /// `executor` as `kind`, and the build holding `contract` and the transition object.
+    struct RowFixture {
+        package: UpgradePackage,
+        build: ReviewedBuild,
+        records: MemberDeployments,
+        manifest: ProxyUpgradeTransitionManifest,
+    }
+
+    impl RowFixture {
+        fn new(
+            kind: LegKind,
+            executor: Address,
+            (domain, slots, slot): (u8, usize, usize),
+            (contract, parameter): (&'static str, &'static str),
+        ) -> Self {
+            let creation = format!("the creation code of {contract}").into_bytes();
+            let args = BRIDGEHUB.abi_encode();
+            let implementation = canonical_create2_address(SALT, &creation, &args);
+            let mut rows = vec![inert(); slots];
+            rows[slot] = ProxyUpgradeRow {
+                proxy: ROW_PROXY,
+                expectedOldImpl: OLD_IMPL,
+                implNew: implementation,
+                callInitializeUpgrade: false,
+            };
+            let manifest = ProxyUpgradeTransitionManifest {
+                domain,
+                proxyUpgrades: rows,
+            };
+            let object =
+                canonical_create2_address(SALT, &transition_code(), &manifest.abi_encode());
+            let build = ReviewedBuild::from_artifacts(
+                CodeIdentity::empty()
+                    .with_contract("l1-contracts/ProxyUpgradeTransition", TRANSITION_RUNTIME),
+                vec![
+                    (
+                        "ProxyUpgradeTransition.sol",
+                        "ProxyUpgradeTransition",
+                        transition_code(),
+                        TRANSITION_RUNTIME.to_vec(),
+                        Vec::new(),
+                    ),
+                    (
+                        "Row.sol",
+                        contract,
+                        creation.clone(),
+                        ROW_RUNTIME.to_vec(),
+                        Vec::new(),
+                    ),
+                ],
+            )
+            .with_constructor(contract, &[(parameter, "address")]);
+            let records = [(
+                implementation,
+                MemberDeploymentRecord {
+                    contract: contract.to_string(),
+                    create2_factory: DETERMINISTIC_CREATE2_FACTORY,
+                    create2_salt: SALT,
+                    constructor_args: Bytes::from(args),
+                },
+            )]
+            .into_iter()
+            .collect();
+            Self {
+                package: package(vec![leg_call(kind, executor, object)], Vec::new()),
+                build,
+                records,
+                manifest,
+            }
+        }
+
+        /// Runs `verify` over `answers` with or without the row's record, every answer read.
+        async fn verify(&mut self, recorded: bool, answers: &[Bytes]) -> VerificationResult {
+            let asserter = Asserter::new();
+            asserter.push_success(&Bytes::from_static(TRANSITION_RUNTIME));
+            asserter.push_success(&Bytes::from(self.manifest.abi_encode()));
+            for answer in answers {
+                asserter.push_success(answer);
+            }
+            let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+            self.package.member_records = if recorded {
+                self.records.clone()
+            } else {
+                MemberDeployments::new()
+            };
+            let mut result = VerificationResult::default();
+            verify(
+                &provider,
+                &self.build,
+                &unread_genesis(),
+                &self.package,
+                Some(GOVERNANCE),
+                &[SALT],
+                &ReviewedEnv::for_test(None, Some(BRIDGEHUB)),
+                &mut result,
+            )
+            .await
+            .unwrap();
+            assert!(asserter.read_q().is_empty(), "every answer was read");
+            result
+        }
+    }
+
+    fn word(address: Address) -> Bytes {
+        Bytes::from(address.abi_encode())
+    }
+
+    /// A CTM-domain row: its `ValidatorTimelock` implementation is held to its record, and its
+    /// `_bridgehubAddr` to the reviewed Bridgehub, which the package's CTM must answer too.
+    #[tokio::test]
+    async fn a_ctm_domain_rows_implementation_is_held_to_its_record_on_the_upgrade_path() {
+        let mut fixture = RowFixture::new(
+            LegKind::Infrastructure,
+            CTM_EXECUTOR,
+            (PROXY_UPGRADE_DOMAIN_CTM, CTM_CONTRACTS.len(), 6),
+            ("ValidatorTimelock", "_bridgehubAddr"),
+        );
+        assert_eq!(CTM_CONTRACTS[6], "ValidatorTimelock");
+        let answers = |ctm_bridgehub: Option<Address>| {
+            let mut answers = vec![
+                Bytes::from_static(&[0x60]), // the CTM executor's code
+                word(CTM),                   // its CHAIN_TYPE_MANAGER
+                word(CTM_ADMIN),             // its CTM_PROXY_ADMIN
+                word(GOVERNANCE),            // the CTM executor's owner
+                word(Address::ZERO),         // its pending owner
+                word(CTM_EXECUTOR),          // the CTM's owner
+                word(CTM_EXECUTOR),          // the CTM-domain ProxyAdmin's owner
+                word(Address::ZERO),         // the CTM's pending owner
+                word(ROW_PROXY),             // the CTM's validatorTimelockPostV29()
+                word(OLD_IMPL),              // the row's live implementation
+                Bytes::from_static(ROW_RUNTIME),
+            ];
+            // The package's CTM's BRIDGE_HUB(), read once the record is.
+            answers.extend(ctm_bridgehub.map(word));
+            answers
+        };
+        let control = fixture.verify(true, &answers(Some(BRIDGEHUB))).await;
+        assert!(
+            !control.has_error("ValidatorTimelock"),
+            "{:?}",
+            control.error_messages
+        );
+
+        let unrecorded = fixture.verify(false, &answers(None)).await;
+        assert_eq!(unrecorded.errors, control.errors + 1);
+        assert!(unrecorded.has_error("a row installs only an implementation its prepare deployed"));
+
+        let elsewhere = fixture.verify(true, &answers(Some(STRANGER))).await;
+        assert_eq!(elsewhere.errors, control.errors + 1);
+        assert!(elsewhere.has_error(&format!(
+            "the package's CTM {CTM} answers BRIDGE_HUB() {STRANGER}, not env test's \
+             bridgehub_proxy_addr {BRIDGEHUB}"
+        )));
+    }
+
+    /// An ecosystem row of a core-only package: its `ChainRegistrationSender` implementation is
+    /// held to its record, and its `_bridgehub` to the reviewed Bridgehub, which the package's
+    /// `bridgehub_proxy_addr` must name too.
+    #[tokio::test]
+    async fn an_ecosystem_rows_implementation_is_held_to_its_record_on_the_upgrade_path() {
+        let slot = L1_ECOSYSTEM_CONTRACTS.len() - 1;
+        assert_eq!(L1_ECOSYSTEM_CONTRACTS[slot], "ChainRegistrationSender");
+        let mut fixture = RowFixture::new(
+            LegKind::Core,
+            CORE_EXECUTOR,
+            (
+                PROXY_UPGRADE_DOMAIN_CORE,
+                L1_ECOSYSTEM_CONTRACTS.len(),
+                slot,
+            ),
+            ("ChainRegistrationSender", "_bridgehub"),
+        );
+        fixture.package.reported_ctm_executor = None;
+        fixture.package.reported_ctm = None;
+        fixture.package.reported_ctm_proxy_admin = None;
+        fixture.package.reported_singletons.bridgehub = Some(BRIDGEHUB);
+        let answers = [
+            Bytes::from_static(&[0x60]), // the core executor's code
+            word(ECO_ADMIN),             // its PROXY_ADMIN
+            word(GOVERNANCE),            // the core executor's owner
+            word(Address::ZERO),         // its pending owner
+            word(CORE_EXECUTOR),         // the ecosystem ProxyAdmin's owner
+            word(ROW_PROXY),             // the Bridgehub's chainRegistrationSender()
+            word(OLD_IMPL),              // the row's live implementation
+            Bytes::from_static(ROW_RUNTIME),
+        ];
+        let control = fixture.verify(true, &answers).await;
+        assert!(
+            !control.has_error("ChainRegistrationSender"),
+            "{:?}",
+            control.error_messages
+        );
+
+        let unrecorded = fixture.verify(false, &answers).await;
+        assert_eq!(unrecorded.errors, control.errors + 1);
+        assert!(unrecorded.has_error("a row installs only an implementation its prepare deployed"));
+
+        fixture.package.reported_singletons.bridgehub = Some(STRANGER);
+        let elsewhere = fixture.verify(true, &answers).await;
+        assert_eq!(elsewhere.errors, control.errors + 1);
+        assert!(elsewhere.has_error(&format!(
+            "the package's bridgehub_proxy_addr {STRANGER} is not env test's bridgehub_proxy_addr \
+             {BRIDGEHUB}"
+        )));
     }
 }

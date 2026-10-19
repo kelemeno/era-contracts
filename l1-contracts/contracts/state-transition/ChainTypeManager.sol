@@ -230,6 +230,19 @@ contract ChainTypeManager is IChainTypeManager, ReentrancyGuard, Ownable2StepUpg
         }
     }
 
+    /// @notice the owner or the Bridgehub's owner can call
+    modifier onlyOwnerOrBridgehubOwner() {
+        _checkOwnerOrBridgehubOwner();
+        _;
+    }
+
+    /// @dev Out of the modifier so its body is not repeated at every guarded function.
+    function _checkOwnerOrBridgehubOwner() private view {
+        if (msg.sender != owner() && msg.sender != Ownable2StepUpgradeable(BRIDGE_HUB).owner()) {
+            revert Unauthorized(msg.sender);
+        }
+    }
+
     /// @inheritdoc IChainTypeManager
     function isZKsyncOS() external pure returns (bool) {
         return true;
@@ -563,15 +576,17 @@ contract ChainTypeManager is IChainTypeManager, ReentrancyGuard, Ownable2StepUpg
         return block.timestamp <= protocolVersionDeadline(_protocolVersion);
     }
 
-    /// @dev freezes the specified chain
+    /// @notice Freezes the specified chain. Callable by the owner and by the Bridgehub's owner
+    ///         ({protocol-docs/ecosystem-upgrade-coordination.md#freezing-a-chain}).
     /// @param _chainId the chainId of the chain
-    function freezeChain(uint256 _chainId) external onlyOwner {
+    function freezeChain(uint256 _chainId) external onlyOwnerOrBridgehubOwner {
         IZKChain(getZKChain(_chainId)).freezeDiamond();
     }
 
-    /// @dev unfreezes the specified chain
+    /// @notice Unfreezes the specified chain. Callable by the owner and by the Bridgehub's owner
+    ///         ({protocol-docs/ecosystem-upgrade-coordination.md#freezing-a-chain}).
     /// @param _chainId the chainId of the chain
-    function unfreezeChain(uint256 _chainId) external onlyOwner {
+    function unfreezeChain(uint256 _chainId) external onlyOwnerOrBridgehubOwner {
         IZKChain(getZKChain(_chainId)).unfreezeDiamond();
     }
 

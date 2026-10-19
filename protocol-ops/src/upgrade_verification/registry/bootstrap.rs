@@ -45,10 +45,13 @@ use super::lifecycle::{
     verify_executor_owners, verify_lifecycle_construction, CoreExecutorReview, CtmExecutorReview,
     LifecycleBindings, LifecycleReview,
 };
-use super::members::{verify_engine_and_l2_plan, DepartingVerifiers, BOOTSTRAP_ENGINES};
+use super::member_construction::{MemberReview, ReviewedEnv};
+use super::members::{verify_engine_and_l2_plan, DepartingMembers, BOOTSTRAP_ENGINES};
 use super::package::BootstrapPackage;
 use super::provenance::{expect_code_identity, tolerate};
-use super::rows::{participating, verify_inventory, Inventory, InventoryReview};
+use super::rows::{
+    participating, verify_inventory, verify_inventory_construction, Inventory, InventoryReview,
+};
 use super::upgrade::{
     cross_check, verify_bytecodes_published, verify_proxy_upgrade_transition, verify_release,
     Publication,
@@ -68,6 +71,7 @@ pub(crate) async fn verify<P: Provider>(
     package: &BootstrapPackage,
     expected_governance_owner: Option<Address>,
     salts: &[B256],
+    env: &ReviewedEnv,
     result: &mut VerificationResult,
 ) -> anyhow::Result<()> {
     // The set of addresses this run establishes as reviewed: every object whose construction
@@ -193,15 +197,22 @@ pub(crate) async fn verify<P: Provider>(
         manifest.expectedProtocolVersion,
     )
     .await;
-    let departing = DepartingVerifiers::new(
+    let departing = DepartingMembers::verifiers_in_force(
         "the verifier the CTM's chains at the departing version run",
         chains.iter().filter_map(|chain| chain.verifier).collect(),
+    );
+    let members = MemberReview::new(
+        &package.member_records,
+        env,
+        Some(manifest.ctm),
+        package.reported_singletons.bridgehub,
     );
     verify_release(
         provider,
         build,
         &genesis,
         result,
+        &members,
         "the release the edge installs",
         manifest.currentRelease,
         salts,
@@ -275,6 +286,7 @@ pub(crate) async fn verify<P: Provider>(
         provider,
         build,
         result,
+        &members,
         "the bootstrap migration",
         manifest.upgradeEngine,
         BOOTSTRAP_ENGINES,
@@ -317,6 +329,7 @@ pub(crate) async fn verify<P: Provider>(
              unverified against the review",
         ),
     }
+    verify_freeze_authority(provider, result, &manifest).await;
 
     // ── 4. The one-time ServerNotifier handover: a precondition of the edge, half of which
     //    governance cannot perform ──
@@ -402,7 +415,7 @@ pub(crate) async fn verify<P: Provider>(
     // Each CTM-domain row must name its slot's proxy and depart from the implementation that is
     // LIVE, not from whatever the prepare saw: a row at an unexpected implementation reverts the
     // bundle wholesale.
-    verify_inventory(
+    let outcome = verify_inventory(
         provider,
         build,
         result,
@@ -417,6 +430,7 @@ pub(crate) async fn verify<P: Provider>(
         },
     )
     .await?;
+    verify_inventory_construction(provider, build, result, &members, &outcome).await?;
 
     // ── 7. Chains the edge leaves behind ──
     result.print_info("\n== Chains below the departing version ==");
@@ -438,7 +452,7 @@ pub(crate) async fn verify<P: Provider>(
             result,
             "the CTM's BRIDGE_HUB(), through which the ecosystem rows' proxies are discovered",
         );
-        verify_inventory(
+        let outcome = verify_inventory(
             provider,
             build,
             result,
@@ -452,9 +466,11 @@ pub(crate) async fn verify<P: Provider>(
             },
         )
         .await?;
+        verify_inventory_construction(provider, build, result, &members, &outcome).await?;
     } else if core_rows.is_none() {
         result.report_ok("no core transition: this edge upgrades no shared singletons");
     }
+    members.report_unconsulted(result);
 
     // ── 9. The calldata governance will actually sign ──
     result.print_info("\n== Governance calldata ==");
@@ -872,6 +888,50 @@ fn judge_notifier_handover(
 
     NotifierHandover {
         under_ctm_proxy_admin,
+    }
+}
+
+/// The CTM takes `freezeChain` / `unfreezeChain` from its own owner and from its Bridgehub's owner
+/// ({protocol-docs/ecosystem-upgrade-coordination.md#freezing-a-chain}). Once the edge hands the CTM
+/// to its executor, that second caller must be the governance the executors answer to, or freezing
+/// the CTM's chains would answer to someone else: an ERROR.
+///
+/// Reads, in order: the CTM's `BRIDGE_HUB()`, then that Bridgehub's `owner()`.
+async fn verify_freeze_authority<P: Provider>(
+    provider: &P,
+    result: &mut VerificationResult,
+    manifest: &views::BootstrapManifest,
+) {
+    let Some(bridgehub) = tolerate(
+        CtmView::new(manifest.ctm, provider)
+            .BRIDGE_HUB()
+            .call()
+            .await,
+        result,
+        "the CTM's BRIDGE_HUB(), whose owner may freeze the CTM's chains",
+    ) else {
+        return;
+    };
+    let Some(owner) = tolerate(
+        BridgehubView::new(bridgehub, provider).owner().call().await,
+        result,
+        "the owner of the CTM's Bridgehub, who may freeze the CTM's chains",
+    ) else {
+        return;
+    };
+    if owner == manifest.governance {
+        result.report_ok(&format!(
+            "the CTM's Bridgehub {bridgehub} is owned by the manifest's governance {owner}, so \
+             freezing the CTM's chains directly answers to the executors' governance"
+        ));
+    } else {
+        result.report_error(&format!(
+            "the CTM's Bridgehub {bridgehub} is owned by {owner}, not by the manifest's governance \
+             {}: the CTM also takes `freezeChain`/`unfreezeChain` from the Bridgehub's owner, so \
+             after the edge freezing its chains would answer to someone other than the executors' \
+             governance",
+            manifest.governance
+        ));
     }
 }
 
@@ -1569,6 +1629,7 @@ mod tests {
             lifecycle: Default::default(),
             force_deployments_data: None,
             executor_records: Default::default(),
+            member_records: Default::default(),
         }
     }
 
@@ -1929,6 +1990,50 @@ mod tests {
         records.core_executor.as_mut().unwrap().address = ATTACKER;
         records.ctm_executor.as_mut().unwrap().address = ATTACKER;
         assert_eq!(judge_records(&records).errors, 2);
+    }
+
+    // ───────────────────────── the freeze authority ─────────────────────────
+
+    const CTM_BRIDGEHUB: Address = Address::repeat_byte(0xB1);
+
+    /// Runs the freeze-authority check over a CTM whose Bridgehub answers `owner` (or reverts).
+    async fn judge_freeze_authority(owner: Option<Address>) -> VerificationResult {
+        let asserter = Asserter::new();
+        asserter.push_success(&Bytes::from(CTM_BRIDGEHUB.abi_encode()));
+        match owner {
+            Some(owner) => asserter.push_success(&Bytes::from(owner.abi_encode())),
+            None => asserter.push_failure_msg("execution reverted"),
+        }
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+        let mut result = VerificationResult::default();
+        verify_freeze_authority(&provider, &mut result, &manifest_with(notifier_row())).await;
+        assert!(asserter.read_q().is_empty(), "both reads were made");
+        result
+    }
+
+    /// The CTM's Bridgehub, read through the CTM, is owned by the manifest's governance: the
+    /// direct freeze route answers to the same governance as the executors.
+    #[tokio::test]
+    async fn a_bridgehub_owned_by_the_manifests_governance_passes() {
+        let governance = manifest_with(notifier_row()).governance;
+        let result = judge_freeze_authority(Some(governance)).await;
+        assert_eq!((result.errors, result.warnings), (0, 0));
+    }
+
+    /// Any other Bridgehub owner could freeze and unfreeze the CTM's chains without governance.
+    #[tokio::test]
+    async fn a_bridgehub_owned_by_anyone_else_fails() {
+        let result = judge_freeze_authority(Some(ATTACKER)).await;
+        assert_eq!(result.errors, 1);
+        assert!(result.has_error("not by the manifest's governance"));
+    }
+
+    /// An owner that cannot be read cannot be held to governance.
+    #[tokio::test]
+    async fn an_unreadable_bridgehub_owner_fails() {
+        let result = judge_freeze_authority(None).await;
+        assert_eq!(result.errors, 1);
+        assert!(result.has_error("could not be read"));
     }
 
     // ───────────────────────── chains below the departing version ─────────────────────────

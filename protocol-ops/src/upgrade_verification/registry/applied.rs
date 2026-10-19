@@ -805,6 +805,7 @@ mod tests {
             },
             force_deployments_data: None,
             executor_records: Default::default(),
+            member_records: Default::default(),
         })
     }
 
@@ -1007,6 +1008,7 @@ mod tests {
             lifecycle: Default::default(),
             force_deployments_data: None,
             executor_records: Default::default(),
+            member_records: Default::default(),
         })
     }
 
@@ -1161,6 +1163,7 @@ mod tests {
             reported_old_version: None,
             reported_new_version: None,
             executor_records: Default::default(),
+            member_records: Default::default(),
         }))
     }
 

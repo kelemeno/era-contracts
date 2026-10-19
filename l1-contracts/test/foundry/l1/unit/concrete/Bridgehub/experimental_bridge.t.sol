@@ -17,7 +17,7 @@ import {
     L2TransactionRequestTwoBridgesInner,
     L2TransactionRequestTwoBridgesOuter
 } from "contracts/core/bridgehub/IBridgehubBase.sol";
-import {DummyChainTypeManagerWBH} from "contracts/dev-contracts/test/DummyChainTypeManagerWithBridgeHubAddress.sol";
+import {MockChainTypeManagerWBH} from "contracts/dev-contracts/test/MockChainTypeManagerWithBridgeHubAddress.sol";
 import {DummyZKChain} from "contracts/dev-contracts/test/DummyZKChain.sol";
 import {DummyBridgehubSetter} from "contracts/dev-contracts/test/DummyBridgehubSetter.sol";
 import {SimpleExecutor} from "contracts/dev-contracts/SimpleExecutor.sol";
@@ -78,7 +78,7 @@ contract ExperimentalBridgeTest is Test {
     DummyBridgehubSetter internal dummyBridgehub;
     address public bridgeOwner;
     address public testTokenAddress;
-    DummyChainTypeManagerWBH internal mockCTM;
+    MockChainTypeManagerWBH internal mockCTM;
     DummyZKChain internal mockChainContract;
     // These are real `L1AssetRouter` instances used as stand-in asset routers in the
     // bridgehub tests; the legacy `DummySharedBridge` dev stub has been removed.
@@ -158,7 +158,7 @@ contract ExperimentalBridgeTest is Test {
             )
         );
         weth = makeAddr("WETH");
-        mockCTM = new DummyChainTypeManagerWBH(address(bridgehub));
+        mockCTM = new MockChainTypeManagerWBH(address(bridgehub));
         IEIP7702Checker eip7702Checker = IEIP7702Checker(Utils.deployEIP7702Checker());
         mockChainContract = new DummyZKChain(address(bridgehub), block.chainid, address(0), eip7702Checker);
 

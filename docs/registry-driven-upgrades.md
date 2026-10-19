@@ -395,21 +395,22 @@ Who can do what once the CTM domain is owned by `CTMUpgradeExecutor`. "Chain sid
 `onlyChainTypeManager` methods have no such path; governance reaches them, like every CTM owner
 method the executor has no entrypoint for, through the executor's owner-gated, logged `forward`.
 
-| CTM owner method                                                                                                                    | Through the executors                                                             | Chain side                              |
-| ----------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | --------------------------------------- |
-| `setNewVersionUpgradeFromTransition` (installs the target release too)                                                              | `applyCTMUpgrade` (the transition governance approved)                            | —                                       |
-| `upgradeChainFromVersion(chainId, oldVersion)`                                                                                      | `upgradeChain`                                                                    | —                                       |
-| `upgradeChainFromVersion(chainId, oldVersion, cut)` (a chain below v35, on a legacy-committed edge; to be deleted in v36)           | `forward` only                                                                    | chain admin (the cut-taking entrypoint) |
-| `L1ChainAssetHandler.pauseCTMMigration` / `unpauseCTMMigration` (as CTM owner; incident control)                                    | `forward`                                                                         | —                                       |
-| `replaceUpgradeTransition` (repair a departed version's transition)                                                                 | `forward`                                                                         | —                                       |
-| `setProtocolVersionDeadline`                                                                                                        | `forward`                                                                         | —                                       |
-| `freezeChain`, `unfreezeChain`, `setValidator`, `setPriorityTxMaxGasLimit`, `deactivatePriorityMode`, `setValidatorTimelockPostV29` | `forward`                                                                         | — (`onlyChainTypeManager`)              |
-| `revertBatches`                                                                                                                     | `forward`                                                                         | validator (`revertBatchesSharedBridge`) |
-| `changeFeeParams`, `setTokenMultiplier`                                                                                             | `forward` only                                                                    | chain admin                             |
-| `setPendingAdmin`                                                                                                                   | `forward` only                                                                    | CTM admin (`onlyOwnerOrAdmin`)          |
-| `setServerNotifier` (owner only: the notifier binding is governance's)                                                              | `forward` only                                                                    | —                                       |
-| `executeUpgrade` (arbitrary cut), legacy `setNewVersionUpgrade` / `setUpgradeDiamondCut`                                            | `forward` only — deliberately: the bypass the object-driven path exists to remove | —                                       |
-| CTM / ProxyAdmin `transferOwnership` (executor succession)                                                                          | `forward` only                                                                    | —                                       |
+| CTM owner method                                                                                                          | Through the executors                                                                                                                               | Chain side                              |
+| ------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| `setNewVersionUpgradeFromTransition` (installs the target release too)                                                    | `applyCTMUpgrade` (the transition governance approved)                                                                                              | —                                       |
+| `upgradeChainFromVersion(chainId, oldVersion)`                                                                            | `upgradeChain`                                                                                                                                      | —                                       |
+| `upgradeChainFromVersion(chainId, oldVersion, cut)` (a chain below v35, on a legacy-committed edge; to be deleted in v36) | `forward` only                                                                                                                                      | chain admin (the cut-taking entrypoint) |
+| `L1ChainAssetHandler.pauseCTMMigration` / `unpauseCTMMigration` (as CTM owner; incident control)                          | `forward`                                                                                                                                           | —                                       |
+| `replaceUpgradeTransition` (repair a departed version's transition)                                                       | `forward`                                                                                                                                           | —                                       |
+| `setProtocolVersionDeadline`                                                                                              | `forward`                                                                                                                                           | —                                       |
+| `freezeChain`, `unfreezeChain`                                                                                            | `forward`; the Bridgehub's owner also calls them directly ([freezing a chain](../protocol-docs/ecosystem-upgrade-coordination.md#freezing-a-chain)) | — (`onlyChainTypeManager`)              |
+| `setValidator`, `setPriorityTxMaxGasLimit`, `deactivatePriorityMode`, `setValidatorTimelockPostV29`                       | `forward`                                                                                                                                           | — (`onlyChainTypeManager`)              |
+| `revertBatches`                                                                                                           | `forward`                                                                                                                                           | validator (`revertBatchesSharedBridge`) |
+| `changeFeeParams`, `setTokenMultiplier`                                                                                   | `forward` only                                                                                                                                      | chain admin                             |
+| `setPendingAdmin`                                                                                                         | `forward` only                                                                                                                                      | CTM admin (`onlyOwnerOrAdmin`)          |
+| `setServerNotifier` (owner only: the notifier binding is governance's)                                                    | `forward` only                                                                                                                                      | —                                       |
+| `executeUpgrade` (arbitrary cut), legacy `setNewVersionUpgrade` / `setUpgradeDiamondCut`                                  | `forward` only — deliberately: the bypass the object-driven path exists to remove                                                                   | —                                       |
+| CTM / ProxyAdmin `transferOwnership` (executor succession)                                                                | `forward` only                                                                                                                                      | —                                       |
 
 The executors hold three more authorities, reached the same way outside their upgrade entrypoints:
 `CTMUpgradeExecutor.forward` for the CTM-domain `ProxyAdmin` and the ServerNotifier's owner methods
@@ -465,11 +466,26 @@ The verification answers three questions for every object a package names:
    question 1 alone. For the MEMBERS — a release's facets, `DiamondInit`, genesis upgrade and
    verifier tree, each engine and composer, each row's `implNew`, and on L2 each bytecode info a
    release's table or a transition's plan names (against the reviewed `(blake2s, length,
-keccak256)`) — it is the identity check: nothing records their constructor arguments, so it
-   proves their code but not the values their constructors wrote into the masked slots. A release
-   may carry over the verifier already in force where it departs from, which an earlier build
-   produced. Every proxy row must also name the proxy of its slot, discovered on chain from the
-   Bridgehub or the CTM. Code the build does not produce for the role is a finding.
+keccak256)`) — it is the identity check, which proves their code but not the values their
+   constructors wrote into the masked slots. Those come from question 1 applied to the members:
+   every prepare records each contract it deploys (`[member_deployments]`: contract, factory, salt,
+   constructor arguments), and each L1 member a package NEWLY installs — including the
+   implementation behind a proxy the package introduces, a proxy that must run the reviewed
+   `TransparentUpgradeableProxy` with the CTM-domain `ProxyAdmin` in its EIP-1967 admin slot — is
+   re-derived from its record and the reviewed creation code, and each recorded argument is held against the live source the prepare
+   read it from (the L1 chain id, the Bridgehub and the proxies discovered through it, the chain
+   cap, the asset router's WETH token and owner, the rollup DA manager of a chain on the CTM, the
+   CTM's own immutables, the sub-verifiers the walk read) or the env's permanent values
+   (`testnet_verifier`), never against anything the package supplies. The Bridgehub is the
+   reviewer's (the env's `bridgehub_proxy_addr`, or `--expected-bridgehub`); the package's CTM and
+   `bridgehub_proxy_addr` must agree with it. A member the departing release (or, at the bootstrap,
+   the verifier the chains run, with its tree) already names was reviewed when it was installed and
+   is not re-derived. A release may carry over the verifier already in force where it departs
+   from, which an earlier build produced. `ZiskVerifier`'s snarkJS Plonk backend is built outside
+   this repository, so it is held to the runtime codehash pinned in
+   `tools/verifier-gen/data/ZiSK_plonk_backend.toml` instead. Every proxy row must also name the
+   proxy of its slot, discovered on chain from the Bridgehub or the CTM. Code the build does not
+   produce for the role is a finding.
 3. **Do the governance calls execute those objects, and nothing else?** For an upgrade the bundle
    carries the executor legs its objects need, each re-encoded from the reviewed executor and
    object, exactly once and as one contiguous run in canonical order (core, CTM infrastructure, CTM
@@ -491,8 +507,11 @@ attacker free to choose both a salt and a counterfeit deployment faces the stand
 address-collision bound rather than a 160-bit preimage; the derivation binds an object to its
 MANIFEST, never to what the manifest's members RUN — a genuine object built from a manifest naming
 an attacker's facet verifies perfectly, which is why question 2 holds every member to the reviewed
-build; and question 2 proves a member's code, not the values in its immutable slots, so those stay
-governance's to review. The first two boundaries are pinned by
+build; the values in a CARRIED-OVER member's immutable slots are the ones an earlier review
+accepted (or none, for a release `ctm init` deployed), not re-checked here; and a proxy a package
+introduces is held to its code, admin and implementation, not to the `initialize` calldata its
+constructor ran. The first two
+boundaries are pinned by
 `test/foundry/l1/upgrades/CounterfeitObject.t.sol`, which builds an actual counterfeit from real
 initcode and asserts the derivation rejects it.
 

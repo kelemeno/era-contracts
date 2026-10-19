@@ -81,7 +81,8 @@ On one anvil fork of L1, in this order:
 4. The ServerNotifier handover calls (bootstrap only), executed on the fork as each target's live
    owner (`UpgradeFull::run_ctm_admin_steps`; see the
    [operations document](../../../docs/upgrade-operations.md#servernotifier-a-one-time-handover-then-an-ordinary-ctm-domain-proxy)).
-5. On PUH-governed environments, the PUH/Guardians redeploy (`zk_governance.rs`).
+5. On PUH-governed environments whose release input declares `redeploy_zk_governance = true`, the
+   PUH/Guardians redeploy (`zk_governance.rs`). No v35 input declares it.
 6. The merge (`upgrade.rs::write_merged_ecosystem_toml`) writes `<env-out>/ecosystem.toml` with ONE
    governance bundle, `[governance_calls] calls`: the merger's own extras (PUH wiring and CTM
    `acceptOwnership` normalization) → the core prepare's declared calls → the executor legs,
@@ -95,7 +96,13 @@ On one anvil fork of L1, in this order:
    calldata alike, not by headcount (`check_bundle_provenance`).
 
 Every prepare deployment rides the CREATE2 factory; the deployer's Safe bundles and `manifest.json`
-land under `--out` (default `upgrade-envs/<version>/output/<env>/protocol-ops/prepare/`).
+land under `--out` (default `upgrade-envs/<version>/output/<env>/protocol-ops/prepare/`). Each
+prepare output also records every contract the run deployed through `deploySimpleContract` or as a
+proxy implementation — reused deployments included, since the factory returns the existing address —
+in `[member_deployments]`, keyed by address: the contract, the CREATE2 factory, the salt and the exact
+constructor arguments (`MemberDeploymentsRecord`). The merge carries it under `[core]` and
+`[ctms.<key>]`, and the review ([§4](#4-verify)) re-derives every member the package newly
+installs from it.
 
 ## 3. Review
 
@@ -127,7 +134,10 @@ construction (the write-once objects from their manifests, the bootstrap sequenc
 it was constructed over — under the salts each prepare leg records in its output
 (`create2_factory_salt`) — and the executors from the `[upgrade_executors]` record of the run that
 deployed them, without which an executor is unverified), that every object and every member it
-names runs the reviewed build's code for its role, that every proxy row names its slot's proxy,
+names runs the reviewed build's code for its role, that every member the package newly installs
+re-derives from its `[member_deployments]` record with each constructor argument equal to the live or
+env value the prepare took it from (without a record it is unverified), that `ZiskVerifier`'s Plonk
+backend runs the pinned runtime, that every proxy row names its slot's proxy,
 the bound authority and the owner the upgrade is driven by, every row's departing implementation,
 that chains crossing the edge keep the system-proxy logic new chains get, readiness,
 and that the calldata governance signs invokes the reviewed upgrade, in canonical order, and

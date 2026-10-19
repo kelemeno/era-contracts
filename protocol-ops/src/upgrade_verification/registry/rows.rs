@@ -16,6 +16,11 @@
 //! 3. Does its `implNew` run the reviewed build of the slot's contract
 //!    ([`super::provenance::expect_code_identity`])? For the `ChainTypeManager` slot also: does it
 //!    carry the reviewed constructor immutables, which code identity masks ([`verify_ctm_immutables`])?
+//! 4. Was its `implNew` built by the reviewed constructor from argument values the review holds
+//!    ([`verify_inventory_construction`], [`super::member_construction`])? Every `implNew` is a
+//!    deployment of the package's own prepare, so each needs a record — as does the
+//!    implementation behind a CTM-domain proxy only the package reports, which a new CTM
+//!    implementation's immutables are held against ([`verify_ctm_immutables`]).
 //!
 //! Before any of that, every participating row must be a real edge ([`row_shape_errors`]). The
 //! row-carrying objects refuse a malformed row at construction too; this reports it before the
@@ -25,12 +30,13 @@ use alloy::primitives::Address;
 use alloy::providers::Provider;
 
 use crate::upgrade_verification::constants::{
-    CTM_CONTRACTS, L1_ECOSYSTEM_CONTRACTS, L2_INTEROP_CENTER_ADDR, PROXY_UPGRADE_DOMAIN_CORE,
-    PROXY_UPGRADE_DOMAIN_CTM,
+    CTM_CONTRACTS, EIP1967_IMPLEMENTATION_SLOT, EIP1967_PROXY_ADMIN_SLOT, L1_ECOSYSTEM_CONTRACTS,
+    L2_INTEROP_CENTER_ADDR, PROXY_UPGRADE_DOMAIN_CORE, PROXY_UPGRADE_DOMAIN_CTM,
 };
 use crate::upgrade_verification::report::VerificationResult;
 
-use super::construction::ReviewedBuild;
+use super::construction::{ReviewedBuild, REVIEWED_PROXY};
+use super::member_construction::{expect_member_construction, ArgContext, Member, MemberReview};
 use super::package::ReportedSingletons;
 use super::provenance::{expect_code_identity, tolerate};
 use super::views::{
@@ -275,8 +281,34 @@ pub(super) struct InventoryReview<'a> {
     pub(super) reported: ReportedSingletons,
 }
 
+/// An implementation whose code identity passed, for its construction check: a participating
+/// row's `implNew`, or the implementation behind a proxy only the package reports.
+pub(super) struct RowImplementation {
+    label: String,
+    address: Address,
+    admitted: &'static [&'static str],
+    identified: &'static str,
+    /// Why the package's prepare must have deployed it.
+    new_because: &'static str,
+    /// The CTM row's immutables as [`verify_ctm_immutables`] established them.
+    ctm_immutables: Option<CtmImmutableExpectations>,
+}
+
+/// The implementations [`verify_inventory`] identified.
+pub(super) struct InventoryOutcome {
+    implementations: Vec<RowImplementation>,
+}
+
+/// Why a row's `implNew` needs a record.
+const ROW_IMPLEMENTATION_IS_NEW: &str =
+    "a row installs only an implementation its prepare deployed";
+/// Why the implementation behind a proxy only the package reports needs a record.
+const REPORTED_IMPLEMENTATION_IS_NEW: &str =
+    "the package introduces the proxy, so its prepare deployed the implementation behind it";
+
 /// Holds every participating row of an inventory to its shape, its slot, its departure and its new
-/// implementation's code. Returns how many rows participate.
+/// implementation's code. Returns the implementations whose code passed, for
+/// [`verify_inventory_construction`].
 ///
 /// Reads, per well-formed participating row: its slot's proxy through the anchor, the live
 /// implementation through the domain admin, then the `implNew`'s code — and for the CTM row its
@@ -286,7 +318,7 @@ pub(super) async fn verify_inventory<P: Provider>(
     build: &ReviewedBuild,
     result: &mut VerificationResult,
     review: &InventoryReview<'_>,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<InventoryOutcome> {
     let inventory = review.inventory;
     let members = inventory.members();
     if review.rows.len() != members.len() {
@@ -298,13 +330,12 @@ pub(super) async fn verify_inventory<P: Provider>(
             members.len()
         ));
     }
-    let mut participating = 0;
+    let mut implementations = Vec::new();
     let mut earlier: Vec<(Address, usize)> = Vec::new();
     for (slot, row) in review.rows.iter().enumerate() {
         if row.implNew.is_zero() {
             continue;
         }
-        participating += 1;
         let Some(member) = members.get(slot) else {
             result.report_error(&format!(
                 "{} slot {slot} ({}) lies beyond the enum this verifier knows: what it upgrades \
@@ -315,8 +346,8 @@ pub(super) async fn verify_inventory<P: Provider>(
             continue;
         };
         let label = format!("{}.{member} row ({})", inventory.enum_name(), row.proxy);
-        let implementations = inventory.implementations(member);
-        if implementations.is_empty() {
+        let admitted = inventory.implementations(member);
+        if admitted.is_empty() {
             result.report_error(&format!(
                 "{label}: {member} is no proxy of its domain, so a row in its slot can never \
                  apply"
@@ -344,25 +375,77 @@ pub(super) async fn verify_inventory<P: Provider>(
             verify_departure(provider, result, &label, row, review.domain_admin).await;
         }
 
-        expect_code_identity(
+        let identified = expect_code_identity(
             provider,
             build,
             result,
             &format!("{label} implNew"),
             row.implNew,
-            implementations,
+            admitted,
         )
         .await?;
-        if inventory == Inventory::CtmDomain && *member == "ChainTypeManager" {
-            verify_ctm_immutables(provider, build, result, review, &label, row.implNew).await?;
+        let (ctm_immutables, reported) = if inventory == Inventory::CtmDomain
+            && *member == "ChainTypeManager"
+        {
+            let (established, reported) =
+                verify_ctm_immutables(provider, build, result, review, &label, row.implNew).await?;
+            (Some(established), reported)
+        } else {
+            (None, Vec::new())
+        };
+        if let Some(identified) = identified {
+            implementations.push(RowImplementation {
+                label: format!("{label} implNew"),
+                address: row.implNew,
+                admitted,
+                identified,
+                new_because: ROW_IMPLEMENTATION_IS_NEW,
+                ctm_immutables,
+            });
         }
+        implementations.extend(reported);
     }
-    Ok(participating)
+    Ok(InventoryOutcome { implementations })
+}
+
+/// Holds each implementation [`verify_inventory`] identified to its construction record. Each is
+/// a deployment of the package's own prepare — a row exists only when the run replaces the live
+/// implementation, and a proxy only the package reports is one it introduces — so none is carried
+/// over.
+pub(super) async fn verify_inventory_construction<P: Provider>(
+    provider: &P,
+    build: &ReviewedBuild,
+    result: &mut VerificationResult,
+    members: &MemberReview<'_>,
+    outcome: &InventoryOutcome,
+) -> anyhow::Result<()> {
+    for implementation in &outcome.implementations {
+        expect_member_construction(
+            provider,
+            build,
+            result,
+            members,
+            Member {
+                label: &implementation.label,
+                address: implementation.address,
+                admitted: implementation.admitted,
+                identified: implementation.identified,
+                carried_over: None,
+                new_because: implementation.new_because,
+                context: match &implementation.ctm_immutables {
+                    Some(expectations) => ArgContext::CtmImmutables(expectations),
+                    None => ArgContext::None,
+                },
+            },
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// A `ChainTypeManager` constructor immutable: code identity masks its value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CtmImmutable {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum CtmImmutable {
     BridgeHub,
     InteropCenter,
     BytecodesSupplier,
@@ -370,6 +453,10 @@ enum CtmImmutable {
     PermissionlessValidator,
     InteropFeeManager,
 }
+
+/// The value each CTM immutable must have and where it comes from, as [`verify_ctm_immutables`]
+/// established it; `None` where nothing does.
+pub(super) type CtmImmutableExpectations = Vec<(CtmImmutable, Option<(Address, String)>)>;
 
 /// Where the value an immutable must have comes from when the live CTM does not answer it.
 enum Fallback {
@@ -394,7 +481,7 @@ impl CtmImmutable {
         Self::InteropFeeManager,
     ];
 
-    fn getter(self) -> &'static str {
+    pub(super) fn getter(self) -> &'static str {
         match self {
             Self::BridgeHub => "BRIDGE_HUB",
             Self::InteropCenter => "INTEROP_CENTER",
@@ -444,18 +531,14 @@ impl CtmImmutable {
         }
     }
 
-    /// The value the review establishes without the live CTM: the reported Bridgehub;
-    /// `L2_INTEROP_CENTER_ADDR` for the interop center (an L1 CTM's names the L2 built-in, as the
-    /// deploy scripts set it); for a CTM-domain singleton the participating inventory row of its
-    /// slot, else the proxy the package reports for it.
+    /// The value the review establishes without the live CTM: `L2_INTEROP_CENTER_ADDR` for the
+    /// interop center (an L1 CTM's names the L2 built-in, as the deploy scripts set it); for a
+    /// CTM-domain singleton the participating inventory row of its slot, else the proxy the
+    /// package reports for it. None for the Bridgehub, which the implementation's construction
+    /// record is held against the reviewed one for ([`super::member_construction`]).
     fn fallback(self, review: &InventoryReview<'_>) -> Fallback {
         match self {
-            Self::BridgeHub => match review.reported.bridgehub {
-                Some(bridgehub) => {
-                    Fallback::Known(bridgehub, "the package's bridgehub_proxy_addr".to_string())
-                }
-                None => Fallback::None,
-            },
+            Self::BridgeHub => Fallback::None,
             Self::InteropCenter => Fallback::Known(
                 L2_INTEROP_CENTER_ADDR,
                 "L2_INTEROP_CENTER_ADDR, the interop center an L1 CTM is built over".to_string(),
@@ -487,11 +570,13 @@ impl CtmImmutable {
 
 /// Holds each constructor immutable of the new `ChainTypeManager` implementation against a value
 /// the review establishes independently: the live CTM's own getter (unchanged across the swap),
-/// else [`CtmImmutable::fallback`]. A zero value, or one nothing establishes, is an error.
+/// else [`CtmImmutable::fallback`]. A zero value, or one nothing establishes, is an error. Returns
+/// the established values, which the implementation's construction record is held against too,
+/// and the implementation behind each proxy only the package reports that it established, whose
+/// own construction is checked like a row's `implNew`.
 ///
 /// Reads, per immutable in [`CtmImmutable::ALL`] order: the implementation's getter, the live
-/// CTM's (when the anchor is known) and, for a reported proxy, its implementation through the
-/// domain admin and that implementation's code.
+/// CTM's (when the anchor is known) and, for a reported proxy, [`establish_reported_proxy`]'s.
 async fn verify_ctm_immutables<P: Provider>(
     provider: &P,
     build: &ReviewedBuild,
@@ -499,7 +584,9 @@ async fn verify_ctm_immutables<P: Provider>(
     review: &InventoryReview<'_>,
     label: &str,
     implementation: Address,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(CtmImmutableExpectations, Vec<RowImplementation>)> {
+    let mut established = CtmImmutableExpectations::new();
+    let mut reported_implementations = Vec::new();
     for immutable in CtmImmutable::ALL {
         let getter = immutable.getter();
         let arriving = tolerate(
@@ -520,18 +607,22 @@ async fn verify_ctm_immutables<P: Provider>(
                     member,
                     field,
                 } => {
-                    let Some(established) = establish_reported_proxy(
+                    let Some((source, behind)) = establish_reported_proxy(
                         provider, build, result, review, proxy, member, field,
                     )
                     .await?
                     else {
+                        established.push((immutable, None));
                         continue;
                     };
-                    Some((proxy, established))
+                    reported_implementations.push(behind);
+                    Some((proxy, source))
                 }
                 Fallback::None => None,
             },
         };
+        let expected = expected.filter(|(value, _)| !value.is_zero());
+        established.push((immutable, expected.clone()));
         let Some(arriving) = arriving else {
             continue;
         };
@@ -553,13 +644,16 @@ async fn verify_ctm_immutables<P: Provider>(
             )),
         }
     }
-    Ok(())
+    Ok((established, reported_implementations))
 }
 
 /// A singleton proxy only the package reports — one this upgrade introduces, which no row upgrades
-/// and the live CTM does not name yet — is established when the domain admin administers it and
-/// it runs the reviewed contract of its slot. Returns how the report names it, or `None` with the
-/// failure reported.
+/// and the live CTM does not name yet — is established when it runs the reviewed
+/// [`REVIEWED_PROXY`], its EIP-1967 admin slot names the domain admin, and the implementation its
+/// EIP-1967 implementation slot names runs the reviewed contract of its slot. Returns how the
+/// report names it and the implementation behind it, or `None` with the failure reported.
+///
+/// Reads: the proxy's code, its admin slot, its implementation slot, the implementation's code.
 async fn establish_reported_proxy<P: Provider>(
     provider: &P,
     build: &ReviewedBuild,
@@ -568,34 +662,60 @@ async fn establish_reported_proxy<P: Provider>(
     proxy: Address,
     member: &'static str,
     field: &'static str,
-) -> anyhow::Result<Option<String>> {
-    let Ok(implementation) = ProxyAdminView::new(review.domain_admin, provider)
-        .getProxyImplementation(proxy)
-        .call()
-        .await
-    else {
-        result.report_error(&format!(
-            "the package's {field} {proxy} is not a proxy the CTM-domain ProxyAdmin {} \
-             administers, so it does not establish the {member} a new CTM implementation must name",
-            review.domain_admin
-        ));
-        return Ok(None);
-    };
-    let label = format!("the package's {field} {proxy}'s implementation");
-    let Some(name) = expect_code_identity(
+) -> anyhow::Result<Option<(String, RowImplementation)>> {
+    let proxy_label = format!("the package's {field} {proxy}");
+    let (_, proxy_contract) = REVIEWED_PROXY;
+    if expect_code_identity(
         provider,
         build,
         result,
-        &label,
-        implementation,
-        review.inventory.implementations(member),
+        &proxy_label,
+        proxy,
+        &[proxy_contract],
     )
     .await?
+    .is_none()
+    {
+        return Ok(None);
+    }
+    // A transparent proxy answers `admin()` and `implementation()` only to its admin, so the
+    // slots are read.
+    let admin = provider
+        .get_storage_at(proxy, EIP1967_PROXY_ADMIN_SLOT.into())
+        .await?;
+    let admin = Address::from_word(admin.into());
+    if admin != review.domain_admin {
+        result.report_error(&format!(
+            "{proxy_label} is administered by {admin}, not the CTM-domain ProxyAdmin {}, so it \
+             does not establish the {member} a new CTM implementation must name",
+            review.domain_admin
+        ));
+        return Ok(None);
+    }
+    result.report_ok(&format!(
+        "{proxy_label} is administered by the CTM-domain ProxyAdmin {admin}"
+    ));
+    let implementation = provider
+        .get_storage_at(proxy, EIP1967_IMPLEMENTATION_SLOT.into())
+        .await?;
+    let implementation = Address::from_word(implementation.into());
+    let label = format!("{proxy_label}'s implementation");
+    let admitted = review.inventory.implementations(member);
+    let Some(name) =
+        expect_code_identity(provider, build, result, &label, implementation, admitted).await?
     else {
         return Ok(None);
     };
-    Ok(Some(format!(
-        "the package's {field}, a CTM-domain proxy running the reviewed {name},"
+    Ok(Some((
+        format!("the package's {field}, a CTM-domain proxy running the reviewed {name},"),
+        RowImplementation {
+            label,
+            address: implementation,
+            admitted,
+            identified: name,
+            new_because: REPORTED_IMPLEMENTATION_IS_NEW,
+            ctm_immutables: None,
+        },
     )))
 }
 
@@ -706,6 +826,12 @@ mod tests {
     use alloy::sol_types::SolValue;
     use alloy::transports::mock::Asserter;
 
+    use super::super::construction::{canonical_create2_address, DETERMINISTIC_CREATE2_FACTORY};
+    use super::super::member_construction::ReviewedEnv;
+    use crate::common::forge::scripts::member_deployments::{
+        MemberDeploymentRecord, MemberDeployments,
+    };
+
     const DOMAIN_ADMIN: Address = Address::repeat_byte(0xAD);
     const CTM: Address = Address::repeat_byte(0xC7);
     const NOTIFIER: Address = Address::repeat_byte(0x5E);
@@ -715,6 +841,7 @@ mod tests {
     const NOTIFIER_RUNTIME: &[u8] = b"the reviewed ServerNotifier runtime";
     const CTM_RUNTIME: &[u8] = b"the reviewed ChainTypeManager runtime";
     const FEE_MANAGER_RUNTIME: &[u8] = b"the reviewed L1InteropFeeManager runtime";
+    const PROXY_RUNTIME: &[u8] = b"the reviewed TransparentUpgradeableProxy runtime";
 
     fn slot_of(member: &str) -> usize {
         CTM_CONTRACTS.iter().position(|m| *m == member).unwrap()
@@ -745,6 +872,10 @@ mod tests {
         rows
     }
 
+    fn creation(name: &str) -> Vec<u8> {
+        format!("the creation code of {name}").into_bytes()
+    }
+
     fn build() -> ReviewedBuild {
         ReviewedBuild::from_artifacts(
             CodeIdentity::empty().with_contract("l1-contracts/ChainTypeManager", CTM_RUNTIME),
@@ -752,26 +883,44 @@ mod tests {
                 (
                     "ServerNotifier.sol",
                     "ServerNotifier",
-                    Vec::new(),
+                    creation("ServerNotifier"),
                     NOTIFIER_RUNTIME.to_vec(),
                     Vec::new(),
                 ),
                 (
                     "ChainTypeManager.sol",
                     "ChainTypeManager",
-                    Vec::new(),
+                    creation("ChainTypeManager"),
                     CTM_RUNTIME.to_vec(),
                     Vec::new(),
                 ),
                 (
                     "L1InteropFeeManager.sol",
                     "L1InteropFeeManager",
-                    Vec::new(),
+                    creation("L1InteropFeeManager"),
                     FEE_MANAGER_RUNTIME.to_vec(),
+                    Vec::new(),
+                ),
+                (
+                    REVIEWED_PROXY.0,
+                    REVIEWED_PROXY.1,
+                    creation(REVIEWED_PROXY.1),
+                    PROXY_RUNTIME.to_vec(),
                     Vec::new(),
                 ),
             ],
         )
+        .with_constructor(
+            "ChainTypeManager",
+            &[
+                ("_bridgehub", "address"),
+                ("_interopCenter", "address"),
+                ("_l1BytecodesSupplier", "address"),
+                ("_permissionlessValidator", "address"),
+                ("_l1InteropFeeManager", "address"),
+            ],
+        )
+        .with_constructor("L1InteropFeeManager", &[("_bridgehub", "address")])
     }
 
     #[test]
@@ -942,7 +1091,22 @@ mod tests {
         answer: impl Fn(CtmImmutable) -> (Option<Address>, Option<Address>),
         extra: &[(CtmImmutable, Option<Bytes>)],
     ) -> VerificationResult {
+        run_ctm_row_reviewed(validator_row, reported, answer, extra, NEW, None).await
+    }
+
+    /// [`run_ctm_row_with`] for a row installing `implementation`, then — when `construction`
+    /// names the records and the reviewer's inputs — every identified implementation's
+    /// construction ([`verify_inventory_construction`]), which reads nothing here.
+    async fn run_ctm_row_reviewed(
+        validator_row: Option<Address>,
+        reported: ReportedSingletons,
+        answer: impl Fn(CtmImmutable) -> (Option<Address>, Option<Address>),
+        extra: &[(CtmImmutable, Option<Bytes>)],
+        implementation: Address,
+        construction: Option<(&MemberDeployments, &ReviewedEnv)>,
+    ) -> VerificationResult {
         let mut rows = inventory("ChainTypeManager", CTM);
+        rows[slot_of("ChainTypeManager")].implNew = implementation;
         if let Some(proxy) = validator_row {
             rows[slot_of("PermissionlessValidator")] = ProxyUpgradeRow {
                 proxy,
@@ -997,8 +1161,14 @@ mod tests {
         // The PermissionlessValidator row's code read fails as a transport error, ending the run
         // after the CTM row was judged.
         if validator_row.is_none() {
-            outcome.unwrap();
+            let outcome = outcome.unwrap();
             assert!(asserter.read_q().is_empty(), "every answer was read");
+            if let Some((records, env)) = construction {
+                let review = MemberReview::new(records, env, None, None);
+                verify_inventory_construction(&provider, &build(), &mut result, &review, &outcome)
+                    .await
+                    .unwrap();
+            }
         }
         result
     }
@@ -1083,14 +1253,14 @@ mod tests {
         assert!(result.has_error("PERMISSIONLESS_VALIDATOR is") && result.has_error("unverified"));
     }
 
-    /// `BRIDGE_HUB` falls back to the package's Bridgehub, `INTEROP_CENTER` to the L2 built-in
-    /// address an L1 CTM is built over.
+    /// `INTEROP_CENTER` falls back to the L2 built-in address an L1 CTM is built over;
+    /// `BRIDGE_HUB` has no fallback, not even the package's `bridgehub_proxy_addr`.
     #[tokio::test]
-    async fn the_bridgehub_and_the_interop_center_have_their_own_fallbacks() {
+    async fn the_interop_center_falls_back_and_the_bridgehub_does_not() {
         const BRIDGEHUB: Address = Address::repeat_byte(0xB0);
-        let answer = |bridgehub: Address, interop: Address| {
+        let answer = |bridgehub: (Address, Option<Address>), interop: Address| {
             move |immutable: CtmImmutable| match immutable {
-                CtmImmutable::BridgeHub => (Some(bridgehub), None),
+                CtmImmutable::BridgeHub => (Some(bridgehub.0), bridgehub.1),
                 CtmImmutable::InteropCenter => (Some(interop), None),
                 _ => (Some(VALIDATOR), Some(VALIDATOR)),
             }
@@ -1099,27 +1269,46 @@ mod tests {
             bridgehub: Some(BRIDGEHUB),
             ..Default::default()
         };
-        let result = run_ctm_row(None, reported, answer(BRIDGEHUB, L2_INTEROP_CENTER_ADDR)).await;
+        let live = (BRIDGEHUB, Some(BRIDGEHUB));
+        let result = run_ctm_row(None, reported, answer(live, L2_INTEROP_CENTER_ADDR)).await;
         assert_eq!(result.errors, 0, "{:?}", result.error_messages);
 
-        let result = run_ctm_row(None, reported, answer(OTHER, OTHER)).await;
-        assert_eq!(result.errors, 2);
-        assert!(result.has_error("BRIDGE_HUB is") && result.has_error("INTEROP_CENTER is"));
+        let result = run_ctm_row(None, reported, answer(live, OTHER)).await;
+        assert_eq!(result.errors, 1, "{:?}", result.error_messages);
+        assert!(result.has_error("INTEROP_CENTER is"));
 
-        let result = run_ctm_row(
-            None,
-            Default::default(),
-            answer(BRIDGEHUB, L2_INTEROP_CENTER_ADDR),
-        )
-        .await;
-        assert_eq!(result.errors, 1);
-        assert!(result.has_error("BRIDGE_HUB is") && result.has_error("unverified"));
+        let unanswered = (BRIDGEHUB, None);
+        for reported in [reported, Default::default()] {
+            let result =
+                run_ctm_row(None, reported, answer(unanswered, L2_INTEROP_CENTER_ADDR)).await;
+            assert_eq!(result.errors, 1, "{:?}", result.error_messages);
+            assert!(result.has_error("BRIDGE_HUB is") && result.has_error("unverified"));
+        }
+    }
+
+    /// The reads that establish a proxy only the package reports, in order: its code, its
+    /// EIP-1967 admin and implementation slots (each as a storage word), the implementation's code.
+    fn reported_proxy(
+        proxy_code: &'static [u8],
+        admin: Address,
+        implementation: Address,
+        implementation_code: &'static [u8],
+    ) -> Vec<(CtmImmutable, Option<Bytes>)> {
+        [
+            Bytes::from_static(proxy_code),
+            addr(admin),
+            addr(implementation),
+            Bytes::from_static(implementation_code),
+        ]
+        .into_iter()
+        .map(|answer| (CtmImmutable::InteropFeeManager, Some(answer)))
+        .collect()
     }
 
     /// A singleton this upgrade introduces — the v35 bootstrap's `L1InteropFeeManager`: the live
     /// CTM does not name it yet and no row upgrades it — is established from the package's
-    /// report only when the CTM-domain ProxyAdmin administers it and it runs the reviewed
-    /// contract of its slot.
+    /// report only when it runs the reviewed proxy, the CTM-domain ProxyAdmin is its admin, and its
+    /// implementation runs the reviewed contract of its slot.
     #[tokio::test]
     async fn a_singleton_only_the_package_reports_must_be_a_reviewed_ctm_domain_proxy() {
         const FEE_MANAGER: Address = Address::repeat_byte(0xFE);
@@ -1135,16 +1324,7 @@ mod tests {
             }
         };
         let established = |code: &'static [u8]| {
-            vec![
-                (
-                    CtmImmutable::InteropFeeManager,
-                    Some(addr(FEE_MANAGER_IMPL)),
-                ),
-                (
-                    CtmImmutable::InteropFeeManager,
-                    Some(Bytes::from_static(code)),
-                ),
-            ]
+            reported_proxy(PROXY_RUNTIME, DOMAIN_ADMIN, FEE_MANAGER_IMPL, code)
         };
 
         let result = run_ctm_row_with(
@@ -1168,16 +1348,39 @@ mod tests {
             result.has_error("the package's interop_fee_manager_proxy_addr, a CTM-domain proxy")
         );
 
-        // Not administered by the CTM-domain ProxyAdmin.
+        // Not administered by the CTM-domain ProxyAdmin: nothing behind it is read.
         let result = run_ctm_row_with(
             None,
             reported,
             answer(FEE_MANAGER),
-            &[(CtmImmutable::InteropFeeManager, None)],
+            &reported_proxy(PROXY_RUNTIME, OTHER, FEE_MANAGER_IMPL, FEE_MANAGER_RUNTIME)[..2],
         )
         .await;
-        assert_eq!(result.errors, 1);
-        assert!(result.has_error("is not a proxy the CTM-domain ProxyAdmin"));
+        assert_eq!(result.errors, 1, "{:?}", result.error_messages);
+        assert!(result.has_error(&format!(
+            "is administered by {OTHER}, not the CTM-domain ProxyAdmin {DOMAIN_ADMIN}"
+        )));
+
+        // Not a proxy at all, though it would answer `implementation()` with the reviewed
+        // implementation: neither its slots nor that implementation are read.
+        let result = run_ctm_row_with(
+            None,
+            reported,
+            answer(FEE_MANAGER),
+            &reported_proxy(
+                b"a contract answering implementation()",
+                DOMAIN_ADMIN,
+                FEE_MANAGER_IMPL,
+                FEE_MANAGER_RUNTIME,
+            )[..1],
+        )
+        .await;
+        assert_eq!(result.errors, 1, "{:?}", result.error_messages);
+        assert!(result.has_error(&format!(
+            "the package's interop_fee_manager_proxy_addr {FEE_MANAGER} at {FEE_MANAGER} runs \
+             code"
+        )));
+        assert!(result.has_error("not the reviewed build of TransparentUpgradeableProxy"));
 
         // Running another contract than the slot's.
         let result = run_ctm_row_with(
@@ -1468,5 +1671,191 @@ mod tests {
             discover(vec![ROUTER, NULLIFIER, HANDLER], "L1InteropHandler").await,
             Some(HANDLER)
         );
+    }
+
+    // ───────────────────────── the implementations' construction ─────────────────────────
+
+    const SALT: alloy::primitives::B256 = alloy::primitives::B256::repeat_byte(0x5A);
+
+    /// The record of `contract` built from `args`, keyed where it lands.
+    fn recorded(contract: &str, args: Vec<u8>) -> (Address, MemberDeployments) {
+        let address = canonical_create2_address(SALT, &creation(contract), &args);
+        let record = MemberDeploymentRecord {
+            contract: contract.to_string(),
+            create2_factory: DETERMINISTIC_CREATE2_FACTORY,
+            create2_salt: SALT,
+            constructor_args: Bytes::from(args),
+        };
+        (address, [(address, record)].into_iter().collect())
+    }
+
+    /// The ServerNotifier row installing `implementation`, then its construction against
+    /// `records`.
+    async fn run_notifier_row(
+        implementation: Address,
+        records: &MemberDeployments,
+    ) -> VerificationResult {
+        let mut rows = inventory("ServerNotifier", NOTIFIER);
+        rows[CTM_CONTRACT_SERVER_NOTIFIER_SLOT].implNew = implementation;
+        let asserter = Asserter::new();
+        for answer in [
+            addr(NOTIFIER),
+            addr(OLD),
+            Bytes::from_static(NOTIFIER_RUNTIME),
+        ] {
+            asserter.push_success(&answer);
+        }
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+        let mut result = VerificationResult::default();
+        let outcome = verify_inventory(
+            &provider,
+            &build(),
+            &mut result,
+            &InventoryReview {
+                inventory: Inventory::CtmDomain,
+                rows: &rows,
+                domain_admin: DOMAIN_ADMIN,
+                anchor: Some(CTM),
+                departure_unreadable: None,
+                reported: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+        let env = ReviewedEnv::default();
+        verify_inventory_construction(
+            &provider,
+            &build(),
+            &mut result,
+            &MemberReview::new(records, &env, None, None),
+            &outcome,
+        )
+        .await
+        .unwrap();
+        assert!(asserter.read_q().is_empty());
+        result
+    }
+
+    /// A row installs an implementation its prepare deployed, so it needs a record.
+    #[tokio::test]
+    async fn a_recorded_implementation_passes_and_an_unrecorded_one_fails() {
+        let (implementation, records) = recorded("ServerNotifier", Vec::new());
+        let result = run_notifier_row(implementation, &records).await;
+        assert_eq!(
+            (result.errors, result.warnings),
+            (0, 0),
+            "{:?}",
+            result.error_messages
+        );
+        let result = run_notifier_row(implementation, &MemberDeployments::new()).await;
+        assert_eq!(result.errors, 1);
+        assert!(result.has_error("a row installs only an implementation its prepare deployed"));
+    }
+
+    /// The constructor arguments of a new CTM implementation, in declaration order.
+    fn ctm_args(validator: Address, fee_manager: Address) -> Vec<u8> {
+        (VALIDATOR, VALIDATOR, VALIDATOR, validator, fee_manager).abi_encode_params()
+    }
+
+    /// A CTM implementation built over another PermissionlessValidator than the live CTM's fails
+    /// twice, independently: through its getter, and through its record.
+    #[tokio::test]
+    async fn a_ctm_implementation_recorded_over_another_permissionless_validator_fails() {
+        let env = ReviewedEnv::for_test(None, Some(VALIDATOR));
+        let kept = |validator: Address| {
+            move |immutable: CtmImmutable| match immutable {
+                CtmImmutable::PermissionlessValidator => (Some(validator), Some(VALIDATOR)),
+                _ => (Some(VALIDATOR), Some(VALIDATOR)),
+            }
+        };
+        let (implementation, records) =
+            recorded("ChainTypeManager", ctm_args(VALIDATOR, VALIDATOR));
+        let result = run_ctm_row_reviewed(
+            None,
+            Default::default(),
+            kept(VALIDATOR),
+            &[],
+            implementation,
+            Some((&records, &env)),
+        )
+        .await;
+        assert_eq!(result.errors, 0, "{:?}", result.error_messages);
+
+        let (implementation, records) = recorded("ChainTypeManager", ctm_args(OTHER, VALIDATOR));
+        let result = run_ctm_row_reviewed(
+            None,
+            Default::default(),
+            kept(OTHER),
+            &[],
+            implementation,
+            Some((&records, &env)),
+        )
+        .await;
+        assert_eq!(result.errors, 2, "{:?}", result.error_messages);
+        assert!(result.has_error("the new implementation's PERMISSIONLESS_VALIDATOR is"));
+        assert!(result.has_error("ChainTypeManager._permissionlessValidator is"));
+    }
+
+    /// The implementation behind a proxy only the package reports — the v35 bootstrap's
+    /// `L1InteropFeeManager` — is the prepare's deployment like a row's `implNew`: held to its
+    /// record, with its `_bridgehub` the reviewed Bridgehub.
+    #[tokio::test]
+    async fn a_reported_proxy_implementation_is_held_to_its_record() {
+        const FEE_MANAGER: Address = Address::repeat_byte(0xFE);
+        const BRIDGEHUB: Address = Address::repeat_byte(0xB0);
+        let reported = ReportedSingletons {
+            interop_fee_manager: Some(FEE_MANAGER),
+            ..Default::default()
+        };
+        let answer = |immutable: CtmImmutable| match immutable {
+            CtmImmutable::BridgeHub => (Some(BRIDGEHUB), Some(BRIDGEHUB)),
+            CtmImmutable::InteropFeeManager => (Some(FEE_MANAGER), None),
+            _ => (Some(VALIDATOR), Some(VALIDATOR)),
+        };
+        let (implementation, mut records) = recorded(
+            "ChainTypeManager",
+            (BRIDGEHUB, VALIDATOR, VALIDATOR, VALIDATOR, FEE_MANAGER).abi_encode_params(),
+        );
+        let env = ReviewedEnv::for_test(None, Some(BRIDGEHUB));
+        let run = |fee_manager_impl: Address, records: MemberDeployments| {
+            let env = &env;
+            async move {
+                run_ctm_row_reviewed(
+                    None,
+                    reported,
+                    answer,
+                    &reported_proxy(
+                        PROXY_RUNTIME,
+                        DOMAIN_ADMIN,
+                        fee_manager_impl,
+                        FEE_MANAGER_RUNTIME,
+                    ),
+                    implementation,
+                    Some((&records, env)),
+                )
+                .await
+            }
+        };
+
+        let (genuine, genuine_record) = recorded("L1InteropFeeManager", BRIDGEHUB.abi_encode());
+        let mut with_genuine = records.clone();
+        with_genuine.extend(genuine_record);
+        let result = run(genuine, with_genuine).await;
+        assert_eq!(result.errors, 0, "{:?}", result.error_messages);
+
+        let (foreign, foreign_record) = recorded("L1InteropFeeManager", OTHER.abi_encode());
+        let mut with_foreign = records.clone();
+        with_foreign.extend(foreign_record);
+        let result = run(foreign, with_foreign).await;
+        assert_eq!(result.errors, 1, "{:?}", result.error_messages);
+        assert!(result.has_error(&format!(
+            "L1InteropFeeManager._bridgehub is {OTHER}, but env test's bridgehub_proxy_addr is \
+             {BRIDGEHUB}"
+        )));
+
+        records.retain(|address, _| *address == implementation);
+        let result = run(genuine, records).await;
+        assert_eq!(result.errors, 1, "{:?}", result.error_messages);
+        assert!(result.has_error("the package introduces the proxy"));
     }
 }

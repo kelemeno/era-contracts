@@ -24,6 +24,7 @@ use super::genesis::GenesisImage;
 use super::lifecycle::{
     verify_executor_owners, verify_lifecycle_construction, CtmExecutorReview, LifecycleReview,
 };
+use super::member_construction::{MemberReview, ReviewedEnv};
 use super::package::{DeadlineChange, RecoveredReplacement, ReplacementPackage};
 use super::provenance::{expect_code_present, tolerate};
 use super::shell::verify_shell_kept;
@@ -41,10 +42,12 @@ pub(crate) async fn verify<P: Provider>(
     package: &ReplacementPackage,
     expected_governance_owner: Option<Address>,
     salts: &[B256],
+    env: &ReviewedEnv,
     result: &mut VerificationResult,
 ) -> anyhow::Result<()> {
     let mut reviewed: BTreeMap<Address, String> = BTreeMap::new();
     let forward = &package.forward;
+    let members = MemberReview::new(&package.member_records, env, Some(forward.ctm), None);
 
     result.print_info("== Package ==");
     result.report_ok(&format!(
@@ -99,6 +102,7 @@ pub(crate) async fn verify<P: Provider>(
         build,
         ArrivingRelease::Existing,
         result,
+        &members,
         "the replacement transition",
         forward.replacement,
         salts,
@@ -250,6 +254,7 @@ pub(crate) async fn verify<P: Provider>(
     for action in &package.external_actions {
         result.print_info(&format!("    · {}", action.describe()));
     }
+    members.report_unconsulted(result);
     Ok(())
 }
 
@@ -713,6 +718,7 @@ mod tests {
                 reported_old_version: None,
                 reported_new_version: None,
                 executor_records: Default::default(),
+                member_records: Default::default(),
             };
             let mut result = VerificationResult::default();
             verify(
@@ -722,6 +728,7 @@ mod tests {
                 &package,
                 Some(GOVERNANCE),
                 &[],
+                &ReviewedEnv::default(),
                 &mut result,
             )
             .await

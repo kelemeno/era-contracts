@@ -141,14 +141,30 @@ The three entrypoints and `forward` are owner-only, and governance owns both exe
 the only authorization; there is no binding between executors to configure or keep in sync. Every
 other owner operation of a domain — freezing a chain, moving a deadline, replacing a committed
 transition — is an ordinary call through the executor's owner-gated, event-logged `forward`; the
-executors carry no typed passthroughs for them. An urgent fix of one domain is a proposal of the one
-leg it needs.
+executors carry no typed passthroughs for them. Freezing has a second route,
+[below](#freezing-a-chain). An urgent fix of one domain is a proposal of the one leg it needs.
 
 A domain moves to a successor executor through the predecessor's `forward`; nothing else names an
 executor, so nothing else is rebound. The successor's immutable bindings say which domain it acts
 on, not that its code is the reviewed code, so governance approval of its construction remains
 required. The procedure is
 [executor succession](../docs/upgrade-operations.md#executor-succession).
+
+### Freezing a chain
+
+`ChainTypeManager.freezeChain` and `unfreezeChain` accept two callers: the CTM's owner (its executor,
+so governance through `forward`) and the Bridgehub's owner, directly. On a `ProtocolUpgradeHandler`
+ecosystem the Bridgehub's owner is the handler, which freezes and unfreezes chains by calling their
+CTM itself: the Security Council's soft freeze, hard freeze and unfreeze, the `reinforce*` variants,
+and the unfreeze that opens every emergency upgrade. Without the second caller they would stop
+reaching a CTM's chains once the bootstrap hands that CTM to its executor. The direct route leaves no
+`CallForwarded` entry; the chain's own `Freeze` / `Unfreeze` events remain.
+
+The second caller is safe only while the Bridgehub's owner is the executors' governance, so
+`verify-bootstrap` holds `bridgehub.owner()` to the bootstrap manifest's governance before the edge
+is signed. The handler wraps each chain's call in `try/catch`, so a chain it failed to freeze goes
+unreported: after a freeze, check `isDiamondStorageFrozen()` on every chain and use the handler's
+`reinforceFreezeOneChain`, which reverts visibly, for any that is not.
 
 ## Replacing a committed transition
 
